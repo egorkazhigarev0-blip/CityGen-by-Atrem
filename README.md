@@ -126,10 +126,6 @@
 Нужен JDK 17. Если путь к профилю Windows содержит кириллицу, задайте временную папку латиницей:
 `TMP=C:\Users\Public\tmp` и `JAVA_TOOL_OPTIONS=-Djdk.net.unixdomain.tmpdir=C:/Users/Public/tmp`.
 
-## ❤️ Поддержать автора
-**Так вы можете поддержать автора:** [обмен в Steam](https://steamcommunity.com/tradeoffer/new/?partner=1869951288&token=joiRehOd).
-Ссылка есть и в самом моде — кнопка ♥ в редакторе.
-
 ## 📄 Лицензия
 [MIT](LICENSE) © 2026 Atrem. Используйте, меняйте и делитесь — с указанием автора.
 
