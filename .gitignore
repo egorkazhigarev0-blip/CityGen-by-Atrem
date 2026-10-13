@@ -1,0 +1,22 @@
+# Gradle / IDE
+.gradle/
+build/
+out/
+bin/
+*.iml
+.idea/
+.vscode/
+.classpath
+.project
+.settings/
+
+# Запуски Minecraft
+run/
+run-data/
+runs/
+logs/
+*.log
+
+# ОС
+Thumbs.db
+.DS_Store
