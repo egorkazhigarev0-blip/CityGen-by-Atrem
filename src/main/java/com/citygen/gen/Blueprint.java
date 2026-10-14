@@ -11,6 +11,9 @@ public class Blueprint {
     public final int w, d, h;
     private final int sx, sz;
     private final BlockState[] data;
+    /** Для проверок: внутренние клетки каждого этажа (без стен) и отметки полов. Заполняет генератор. */
+    public boolean[][][] inner;
+    public int[] floorY;
 
     public Blueprint(int w, int d, int h) {
         this.w = w; this.d = d; this.h = h;

@@ -42,7 +42,20 @@ public final class JobManager {
         if (!allowed(sp)) { msg(sp, "Нужны права оператора или творческий режим.", ChatFormatting.RED); return; }
         if (current != null) { msg(sp, "Уже идёт постройка. Дождитесь окончания или /citygen cancel.", ChatFormatting.YELLOW); return; }
         s.sanitize();
-        if (anchor.distSqr(new BlockPos(sp.getBlockX(), anchor.getY(), sp.getBlockZ())) > 192 * 192) {
+        if (s.arrangement == GenSettings.Arrangement.CITY) {
+            if (s.quarters.isEmpty()) { msg(sp, "В городе нет ни одного квартала. Добавьте их в редакторе города.", ChatFormatting.YELLOW); return; }
+            double best = Double.MAX_VALUE;
+            for (int i = 0; i < s.quarters.size(); i++) {
+                if (s.buildOnly >= 0 && i != s.buildOnly) continue;
+                GenSettings.Quarter q = s.quarters.get(i);
+                double dx = Math.max(0, Math.max(q.x0 - sp.getX(), sp.getX() - q.x1)), dz = Math.max(0, Math.max(q.z0 - sp.getZ(), sp.getZ() - q.z1));
+                best = Math.min(best, dx * dx + dz * dz);
+            }
+            if (best > 256 * 256) {
+                msg(sp, "Вы слишком далеко от кварталов (дальше 256 блоков). Подойдите ближе или нажмите «Перенести сюда» в редакторе города.", ChatFormatting.YELLOW);
+                return;
+            }
+        } else if (anchor.distSqr(new BlockPos(sp.getBlockX(), anchor.getY(), sp.getBlockZ())) > 192 * 192) {
             msg(sp, "Вы слишком далеко от рамок превью. Подойдите ближе или нажмите «Сюда» в редакторе.", ChatFormatting.YELLOW);
             return;
         }
@@ -50,8 +63,17 @@ public final class JobManager {
         long t0 = System.nanoTime();
 
         Layout layout = Layout.compute(s, anchor, look, level);
+        if (layout.plans.size() > 220) {
+            msg(sp, "Слишком большой город за один раз (" + layout.plans.size() + " зданий). Стройте по кварталам: «Построить квартал» в редакторе города.", ChatFormatting.YELLOW);
+            return;
+        }
         OpList all = makeOps(layout, s);
-        String title = layout.plans.size() + " зд. (" + (s.arrangement == GenSettings.Arrangement.PLANNER ? "кварталы" : s.type.label) + ")";
+        if (all.size() > 12_000_000) {
+            msg(sp, String.format("Слишком много блоков (%,d). Стройте по кварталам или уменьшите интерьеры.", all.size()), ChatFormatting.YELLOW);
+            return;
+        }
+        String title = layout.plans.size() + " зд. (" + (s.arrangement == GenSettings.Arrangement.CITY
+                ? (s.buildOnly >= 0 ? "квартал «" + s.quarters.get(s.buildOnly).name + "»" : "город") : s.type.label) + ")";
         current = new BuildJob(level, sp.getUUID(), all, title);
         long ms = (System.nanoTime() - t0) / 1_000_000;
         msg(sp, String.format("План готов за %d мс: %d зданий, %,d операций. Строю…", ms, layout.plans.size(), all.size()),
@@ -97,7 +119,7 @@ public final class JobManager {
             for (int x = -M - p.yardSide; x <= p.w + M - 1 + p.yardSide; x++)
                 for (int z = -M - p.yardFront; z <= p.d + M - 1; z++) mark.accept(p.toWorld(x, 0, z), p.baseY);
         for (Layout.Strip st : L.strips)
-            for (int u = st.u0; u <= st.u1; u++) for (int v = st.v0; v <= st.v1; v++) mark.accept(L.site(u, v, 0), L.streetY);
+            for (int x = st.minX; x <= st.maxX; x++) for (int z = st.minZ; z <= st.maxZ; z++) mark.accept(new BlockPos(x, 0, z), st.y);
         for (LotPlan lp : L.lots)
             for (int x = lp.minX; x <= lp.maxX; x++) for (int z = lp.minZ; z <= lp.maxZ; z++) mark.accept(new BlockPos(x, 0, z), lp.baseY);
         OpList ops = new OpList();
@@ -105,6 +127,23 @@ public final class JobManager {
         BlockState air = Blocks.AIR.defaultBlockState();
         boolean flat = s.ground == GenSettings.GroundMode.PLAYER;
         int ring = 6;
+        if (s.arrangement == GenSettings.Arrangement.CITY) {
+            // город: полная расчистка только кварталов с улицами; вокруг — лишь растительность, рельеф между кварталами не трогаем
+            it.unimi.dsi.fastutil.longs.LongOpenHashSet veg = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+            for (var e : full.long2IntEntrySet()) {
+                long key = e.getLongKey();
+                int x = BlockPos.getX(key), z = BlockPos.getZ(key);
+                ops.add(new BlockPos(x, e.getIntValue(), z), air, OpList.COLUMN_FULL);
+                for (int dx = -ring; dx <= ring; dx++)
+                    for (int dz = -ring; dz <= ring; dz++) {
+                        long k2 = BlockPos.asLong(x + dx, 0, z + dz);
+                        if (full.get(k2) == Integer.MIN_VALUE) veg.add(k2);
+                    }
+            }
+            for (long key : veg) ops.add(new BlockPos(BlockPos.getX(key), box[4] - 8, BlockPos.getZ(key)), air, OpList.COLUMN_VEG);
+            ops.floodBox = new int[]{box[0] - 14, box[1] - 14, box[2] + 14, box[3] + 14, box[4] - 10};
+            return ops;
+        }
         for (int x = box[0] - ring; x <= box[2] + ring; x++)
             for (int z = box[1] - ring; z <= box[3] + ring; z++) {
                 int base = full.get(BlockPos.asLong(x, 0, z));

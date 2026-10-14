@@ -29,6 +29,11 @@ public final class ClientState {
     public static Direction look = Direction.NORTH;
     public static ResourceKey<Level> dimension;
     public static Layout layout;
+    /** Выбранный квартал (редактор города и правка в мире). */
+    public static int selected = -1;
+    /** Режим правки кварталов прямо в мире (без открытого окна). */
+    public static boolean worldEdit;
+    private static long dirtyAt = -1;
 
     private ClientState() {}
 
@@ -98,11 +103,57 @@ public final class ClientState {
         MapPreview.markDirty();
     }
 
+    /** Отложенный пересчёт превью: при частых изменениях (перетаскивание, удержание клавиш) — не чаще, чем раз в 150 мс. */
+    public static void requestRecompute() { dirtyAt = System.currentTimeMillis(); }
+
+    public static void tick() {
+        if (dirtyAt >= 0 && System.currentTimeMillis() - dirtyAt > 150) { dirtyAt = -1; recompute(); }
+    }
+
+    public static GenSettings.Quarter selectedQuarter() {
+        return selected >= 0 && selected < settings.quarters.size() ? settings.quarters.get(selected) : null;
+    }
+
+    /** Сдвигает все кварталы так, чтобы город начинался перед игроком. Возвращает новый центр города. */
+    public static int[] moveCityToPlayer() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || settings.quarters.isEmpty()) return null;
+        int x0 = Integer.MAX_VALUE, z0 = Integer.MAX_VALUE, x1 = Integer.MIN_VALUE, z1 = Integer.MIN_VALUE;
+        for (GenSettings.Quarter q : settings.quarters) { x0 = Math.min(x0, q.x0); z0 = Math.min(z0, q.z0); x1 = Math.max(x1, q.x1); z1 = Math.max(z1, q.z1); }
+        Direction f = mc.player.getDirection();
+        int w = x1 - x0 + 1, d = z1 - z0 + 1;
+        int cx = mc.player.getBlockX() + f.getStepX() * (w / 2 + 14), cz = mc.player.getBlockZ() + f.getStepZ() * (d / 2 + 14);
+        int dx = cx - (x0 + w / 2), dz = cz - (z0 + d / 2);
+        for (GenSettings.Quarter q : settings.quarters) q.moveBy(dx, dz);
+        anchor = mc.player.blockPosition();
+        look = f;
+        dimension = mc.player.level().dimension();
+        recompute();
+        return new int[]{cx, cz};
+    }
+
+    /** Построить один квартал (остальные остаются в плане). */
+    public static void buildQuarter(int qi) {
+        settings.arrangement = GenSettings.Arrangement.CITY;
+        settings.buildOnly = qi;
+        build();
+        settings.buildOnly = -1;
+        save();
+    }
+
+    public static void buildCity() {
+        settings.arrangement = GenSettings.Arrangement.CITY;
+        settings.buildOnly = -1;
+        build();
+    }
+
     public static void build() {
         if (anchor == null) anchorHere();
         Network.CHANNEL.sendToServer(new BuildPacket(settings.copy(), anchor, look));
         previewActive = false;
-        if (settings.newSeedEachBuild) settings.seed = new Random().nextLong() & 0xFFFFFFFFL;
+        // в городе сид не меняем: иначе у ещё не построенных кварталов поменялись бы здания
+        if (settings.newSeedEachBuild && settings.arrangement != GenSettings.Arrangement.CITY)
+            settings.seed = new Random().nextLong() & 0xFFFFFFFFL;
         save();
         recompute();
     }

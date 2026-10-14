@@ -10,6 +10,7 @@ public class LotPlan {
     public final Direction facing;
     public final long seed;
     public int baseY;
+    public int quarter = -1;
 
     public LotPlan(CellType kind, int minX, int minZ, int maxX, int maxZ, Direction facing, long seed) {
         this.kind = kind; this.minX = minX; this.minZ = minZ; this.maxX = maxX; this.maxZ = maxZ;

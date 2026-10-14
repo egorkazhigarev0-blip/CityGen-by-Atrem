@@ -1,8 +1,12 @@
 package com.citygen.gen;
 
 import com.citygen.gen.GenSettings.*;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.LanternBlock;
+import net.minecraft.world.level.block.SupportType;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.*;
@@ -103,14 +107,40 @@ public class BuildingGenerator {
         if (interior != Interior.NONE) buildVertical();
         entrance();
         if (facade == FacadeType.COLONNADE) portico();
-        if (p.fireEscape) fireEscape();
-        if (interior == Interior.ROOMS || interior == Interior.FURNISHED) new InteriorGenerator(this).run();
+        boolean cons = p.underConstruction;
+        if (p.fireEscape && !cons) fireEscape();
+        if (!cons && (interior == Interior.ROOMS || interior == Interior.FURNISHED)) new InteriorGenerator(this).run();
+        if (cons) { weathering(); constructionSite(); fixHanging(); return bp; }
         if (s.rooftop) {
             if (p.roof == RoofType.FLAT || p.roof == RoofType.DOME) rooftop();
             else if (mansardFloor >= 0) chimneys();
         }
         weathering();
+        fixHanging();
+        markInner();
         return bp;
+    }
+
+    /** Подвесные фонари без опоры сверху (под верхней плиткой, лесами и т.п.) в мире бы осыпались — убираем. */
+    private void fixHanging() {
+        for (int y = 1; y < bp.h - 1; y++)
+            for (int x = bp.minX(); x <= bp.maxX(); x++)
+                for (int z = bp.minZ(); z <= bp.maxZ(); z++) {
+                    BlockState b = bp.get(x, y, z);
+                    if (b == null || !(b.getBlock() instanceof LanternBlock) || !b.getValue(LanternBlock.HANGING)) continue;
+                    BlockState a = bp.get(x, y + 1, z);
+                    if (a == null || !a.isFaceSturdy(EmptyBlockGetter.INSTANCE, BlockPos.ZERO, Direction.DOWN, SupportType.CENTER))
+                        bp.set(x, y, z, AIR);
+                }
+    }
+
+    private void markInner() {
+        bp.inner = new boolean[N][W][D];
+        bp.floorY = fy.clone();
+        for (int i = 0; i < N; i++)
+            for (int x = 0; x < W; x++)
+                for (int z = 0; z < D; z++)
+                    bp.inner[i][x][z] = in(mask[i], x, z) && !isWall(mask[i], x, z) && !(elevX0 >= 0 && x >= elevX0 && x < elevX0 + 4 && z >= elevZ0 && z < elevZ0 + 4);
     }
 
     // =====================================================================
@@ -284,7 +314,8 @@ public class BuildingGenerator {
 
     private void houseWing(boolean[][] full) {
         if (W >= 10 && D >= 8 && rnd.nextFloat() < 0.5f) {
-            int mw = Math.max(6, (int) (W * 0.62));
+            int mw = Math.max(W / 2 + 3, (int) (W * 0.62)); // вход посередине фасада не должен попасть на угол
+            if (mw > W - 3) return;
             boolean[][] main = rect(0, 0, mw - 1, D - 1);
             boolean[][] all = rect(0, 0, mw - 1, D - 1);
             for (int x = mw - 1; x < W; x++) for (int z = D / 3; z < D; z++) all[x][z] = true;
@@ -319,7 +350,8 @@ public class BuildingGenerator {
         shaftL = a + 2;
         int sw = 6, sl = shaftL + 2;
         if (wantWell) {
-            boolean elev = s.elevators && N >= 5;
+            boolean elev = s.elevators && N >= 10 && (p.type == BuildingType.SKYSCRAPER || p.type == BuildingType.OFFICE
+                    || p.type == BuildingType.HIGHRISE);
             for (int pass = elev ? 0 : 1; pass < 2 && shaftX0 < 0; pass++) {
                 int tw = pass == 0 ? sw + 3 : sw, tl = Math.max(sl, 4);
                 int best = Integer.MAX_VALUE;
@@ -368,6 +400,13 @@ public class BuildingGenerator {
                         if (cx >= 0 && cx < W) { reserved[i][cx][flightZ] = true; }
                         if (cx >= 0 && cx < W && i > 0) reserved[i][cx][flightZ - 1] = true;
                     }
+                // подходы к маршу и площадка наверху — без мебели и перегородок
+                for (int i = 0; i <= N; i++) {
+                    keepClear.add(new int[]{i, flightX - 2, flightZ});
+                    keepClear.add(new int[]{i, flightX - 1, flightZ - 1});
+                    keepClear.add(new int[]{i, flightX + maxH + 1, flightZ});
+                    keepClear.add(new int[]{i, flightX + maxH, flightZ - 1});
+                }
                 return;
             }
         }
@@ -492,8 +531,8 @@ public class BuildingGenerator {
             int y0 = fy[i];
             placeDoor(Blocks.IRON_DOOR, x0 + 1, y0 + 1, z0, Direction.SOUTH, DoorHingeSide.RIGHT);
             placeDoor(Blocks.IRON_DOOR, x0 + 2, y0 + 1, z0, Direction.SOUTH, DoorHingeSide.LEFT);
-            bp.set(x0 + 3, y0 + 2, z0 - 1, with(with(st(Blocks.STONE_BUTTON), BlockStateProperties.ATTACH_FACE, AttachFace.WALL),
-                    BlockStateProperties.HORIZONTAL_FACING, Direction.NORTH));
+            // декоративный лифт: двери закрыты, внутри на каждом этаже пол кабины — упасть в шахту нельзя
+            for (int x = x0 + 1; x <= x0 + 2; x++) for (int z = z0 + 1; z <= z0 + 2; z++) bp.set(x, y0, z, st(Blocks.SMOOTH_STONE));
         }
     }
 
@@ -947,7 +986,11 @@ public class BuildingGenerator {
             else st = trad ? trim : frame;
             bp.set(x, r, z, st);
         }
-        if (c[0] == WIN && c[1] % 2 == 0 && c[3] == 1 && h - 3 >= 2) placeDoor(pal.door, x, 1, z, n.getOpposite(), DoorHingeSide.LEFT);
+        if (c[0] == WIN && c[1] % 2 == 0 && c[3] == 1 && h - 3 >= 2) {
+            placeDoor(pal.door, x, 1, z, n.getOpposite(), DoorHingeSide.LEFT);
+            keepClear.add(new int[]{0, x - n.getStepX(), z - n.getStepZ()});
+            keepClear.add(new int[]{0, x - 2 * n.getStepX(), z - 2 * n.getStepZ()});
+        }
         if (pos >= 1 && pos <= len - 2) {
             if (trad) {
                 if (c[0] == WIN) setO(x, z, n, 1, h - 2, trapdoor(pal.trapdoor, n, false, Half.TOP));
@@ -1040,13 +1083,31 @@ public class BuildingGenerator {
     // =====================================================================
     // Вход, портик, пожарная лестница
     // =====================================================================
+    private int front(int x) {
+        if (x < 0 || x >= W) return -1;
+        for (int z = 0; z < D; z++) if (mask[0][x][z]) return z;
+        return -1;
+    }
+
+    /** Подходит ли место для двери: ровный участок фасада и проход внутрь. */
+    private boolean doorFits(int xa, int xb) {
+        int z0 = front(xa);
+        if (z0 < 0) return false;
+        for (int x = xa - 1; x <= xb + 1; x++) if (front(x) != z0) return false;
+        for (int x = xa; x <= xb; x++) if (!in(mask[0], x, z0 + 1) || isWall(mask[0], x, z0 + 1) || core[x][z0 + 1]) return false;
+        return true;
+    }
+
     private void entrance() {
-        int cx = W / 2;
-        int z0 = -1;
-        for (int z = 0; z < D; z++) if (mask[0][cx][z]) { z0 = z; break; }
-        if (z0 < 0) return;
         boolean house = p.type.small();
         boolean dbl = W >= 12 && !house;
+        int cx = W / 2;
+        for (int k = 0; k < W; k++) {
+            int x = W / 2 + ((k % 2 == 0) ? k / 2 : -(k / 2 + 1));
+            if (doorFits(dbl ? x - 1 : x, x)) { cx = x; break; }
+        }
+        int z0 = front(cx);
+        if (z0 < 0) return;
         int xa = dbl ? cx - 1 : cx, xb = cx;
         entranceX0 = xa; entranceX1 = xb; entranceZ = z0;
         int gh = fh[0];
@@ -1080,15 +1141,12 @@ public class BuildingGenerator {
 
     /** Античный портик: колонны с базой и капителью, антаблемент; у общественных зданий — на всю высоту. */
     private void portico() {
-        int xa = W, xb = -1, z0 = -1;
-        for (int x = 1; x < W - 1; x++) {
-            int fz = -1;
-            for (int z = 0; z < D; z++) if (mask[0][x][z]) { fz = z; break; }
-            if (fz < 0) continue;
-            if (z0 < 0) z0 = fz;
-            if (fz == z0) { xa = Math.min(xa, x); xb = Math.max(xb, x); }
-        }
-        if (xb - xa < 4 || z0 < 0) return;
+        // портик — по ровному участку фасада вокруг середины (не прорезая выступающие крылья)
+        int z0 = front(W / 2), xa = W / 2, xb = W / 2;
+        if (z0 < 0) return;
+        while (xa - 1 >= 1 && front(xa - 1) == z0) xa--;
+        while (xb + 1 < W - 1 && front(xb + 1) == z0) xb++;
+        if (xb - xa < 4) return;
         portico = true;
         boolean giant = p.type == BuildingType.CIVIC || N <= 3;
         int topY = giant ? fy[N] - 1 : fy[1] - 1;
@@ -1097,6 +1155,8 @@ public class BuildingGenerator {
         Set<Integer> cols = new HashSet<>();
         for (int k = 0; k < nc; k++) cols.add(xa + (int) Math.round(k * (len - 1) / (double) (nc - 1)));
         for (int x = xa - 1; x <= xb + 1; x++) {
+            int fx = front(x);
+            if (fx >= 0 && fx < z0) continue;
             for (int o = 1; o <= 2; o++) {
                 bp.set(x, 0, z0 - o, base);
                 for (int y = 1; y <= topY; y++) bp.set(x, y, z0 - o, AIR);
@@ -1377,6 +1437,126 @@ public class BuildingGenerator {
             bp.set(x, y + 3, z, slab(pal.trimSlab, SlabType.BOTTOM));
             k++;
         }
+    }
+
+    // =====================================================================
+    // Стройка: каркас верхних этажей, леса, сетка, кран, ограждение
+    // =====================================================================
+    private void constructionSite() {
+        Random r = new Random(p.seed ^ 0xB111DL);
+        boolean small = p.type.small();
+        int built = Math.max(1, Math.min(N, (int) Math.round(N * (0.35 + r.nextDouble() * 0.4))));
+        if (N >= 3 && built >= N) built = N - 1;
+        int frameFrom = small ? Math.max(0, built - 1) : Math.max(1, built - (N >= 6 ? 2 : 1));
+        int topY = fy[built];
+        BlockState slabM = st(small ? Blocks.SPRUCE_PLANKS : Blocks.GRAY_CONCRETE);
+        BlockState colM = small ? with(st(Blocks.STRIPPED_SPRUCE_LOG), BlockStateProperties.AXIS, Direction.Axis.Y) : st(Blocks.LIGHT_GRAY_CONCRETE);
+        boolean[][] deckMask = mask[built - 1];
+        // 1) всё выше уровня стройки убираем, на верхнем уровне — монолитная плита
+        for (int y = topY; y < bp.h; y++)
+            for (int z = bp.minZ(); z <= bp.maxZ(); z++)
+                for (int x = bp.minX(); x <= bp.maxX(); x++) {
+                    boolean inside = in(deckMask, x, z);
+                    if (y == topY && inside) { if (!core[x][z]) bp.set(x, y, z, slabM); }
+                    else bp.set(x, y, z, null);
+                }
+        // 2) верхние построенные этажи — только колонны и плиты
+        for (int i = frameFrom; i < built; i++) {
+            boolean[][] m = mask[i];
+            for (int y = fy[i]; y < fy[i + 1]; y++)
+                for (int z = bp.minZ(); z <= bp.maxZ(); z++)
+                    for (int x = bp.minX(); x <= bp.maxX(); x++) {
+                        if (!in(m, x, z)) { bp.set(x, y, z, null); continue; }
+                        if (core[x][z]) continue;
+                        if (y == fy[i]) { if (i > 0) bp.set(x, y, z, slabM); continue; }
+                        boolean col = isWall(m, x, z) ? (outs(m, x, z).size() >= 2 || Math.floorMod(x + z, 4) == 0)
+                                : (x % 6 == 3 && z % 6 == 3);
+                        bp.set(x, y, z, col ? colM : AIR);
+                    }
+        }
+        // 3) готовые этажи ещё без света
+        for (int y = 0; y < topY; y++)
+            for (int z = 0; z < D; z++)
+                for (int x = 0; x < W; x++) {
+                    BlockState b = bp.get(x, y, z);
+                    if (b != null && b.is(pal.light)) bp.set(x, y, z, slabM);
+                }
+        // 4) арматура над колоннами
+        if (built < N && !small)
+            for (int z = 0; z < D; z++)
+                for (int x = 0; x < W; x++)
+                    if (in(deckMask, x, z) && isWall(deckMask, x, z) && Math.floorMod(x + z, 4) == 0 && !core[x][z]) {
+                        bp.set(x, topY + 1, z, st(Blocks.IRON_BARS));
+                        if (r.nextBoolean()) bp.set(x, topY + 2, z, st(Blocks.IRON_BARS));
+                    }
+        int[] b0 = bbox(mask[0]);
+        int fx0 = b0[0], fz0 = b0[1], fx1 = b0[2], fz1 = b0[3];
+        // 5) леса спереди и сзади, строительная сетка на каркасе
+        BlockState scaff = with(with(st(Blocks.SCAFFOLDING), BlockStateProperties.STABILITY_DISTANCE, 0), BlockStateProperties.BOTTOM, false);
+        BlockState plank = slab(Blocks.SPRUCE_SLAB, SlabType.TOP);
+        BlockState net = st(Blocks.GREEN_STAINED_GLASS_PANE);
+        for (int side = 0; side < 2; side++) {
+            int sz = side == 0 ? fz0 - 1 : fz1 + 1;
+            for (int x = fx0 - 1; x <= fx1 + 1; x++) {
+                boolean colX = Math.floorMod(x - fx0 + 1, 3) == 0 && !(side == 0 && Math.abs(x - W / 2) <= 1);
+                if (colX) {
+                    for (int y = 1; y <= topY + 2; y++) bp.set(x, y, sz, scaff);
+                }
+                for (int i = 1; i <= built; i++) if (!colX) bp.set(x, fy[i], sz, plank);
+                if (side == 0 && !small)
+                    for (int y = fy[Math.max(1, frameFrom)] + 1; y <= topY + 1; y++) bp.set(x, y, sz - 1, net);
+            }
+        }
+        // 6) башенный кран (у больших зданий)
+        if (!small && N >= 3) crane(r, topY, fz0);
+        // 7) ограждение площадки и стройматериалы
+        BlockState fence = st(Blocks.SPRUCE_FENCE);
+        int gz = fz1 + 2;
+        for (int x = fx0 - 2; x <= fx1 + 2; x++) if (Math.abs(x - (fx0 + fx1) / 2) > 1) bp.set(x, 1, gz, fence);
+        if (!p.party)
+            for (int z = fz0; z <= gz; z++) { bp.set(fx0 - 2, 1, z, fence); bp.set(fx1 + 2, 1, z, fence); }
+        int props = 2 + r.nextInt(3);
+        for (int k = 0, tries = 0; k < props && tries < 40; tries++) {
+            int x = 1 + r.nextInt(Math.max(1, W - 2)), z = 1 + r.nextInt(Math.max(1, D - 2));
+            if (!in(deckMask, x, z) || isWall(deckMask, x, z) || core[x][z] || bp.get(x, topY + 1, z) != null) continue;
+            switch (r.nextInt(4)) {
+                case 0 -> { bp.set(x, topY + 1, z, st(Blocks.BRICKS)); bp.set(x, topY + 2, z, slab(Blocks.BRICK_SLAB, SlabType.BOTTOM)); }
+                case 1 -> bp.set(x, topY + 1, z, with(st(Blocks.BARREL), BlockStateProperties.FACING, Direction.UP));
+                case 2 -> bp.set(x, topY + 1, z, st(Blocks.CAULDRON));
+                default -> { bp.set(x, topY + 1, z, st(Blocks.STONE_BRICKS)); bp.set(x, topY + 2, z, st(Blocks.STONE_BRICKS)); }
+            }
+            k++;
+        }
+    }
+
+    /** Башенный кран внутри пятна здания: мачта сквозь этажи, стрела над фасадом, противовес и груз на цепи. */
+    private void crane(Random r, int topY, int fz0) {
+        int xm = -1, zm = -1;
+        for (int tries = 0; tries < 60 && xm < 0; tries++) {
+            int x = 2 + r.nextInt(Math.max(1, W - 4)), z = Math.max(2, D - 4 - r.nextInt(3));
+            if (!inAll(x, z) || core[x][z]) continue;
+            boolean wall = false;
+            for (int i = 0; i < N; i++) if (isWall(mask[i], x, z)) wall = true;
+            if (!wall) { xm = x; zm = z; }
+        }
+        if (xm < 0) return;
+        int mh = Math.min(fy[N] + 4, bp.h - 6);
+        BlockState yellow = st(Blocks.YELLOW_CONCRETE), gray = st(Blocks.GRAY_CONCRETE);
+        for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) bp.set(xm + dx, 0, zm + dz, gray);
+        for (int y = 1; y <= mh; y++) bp.set(xm, y, zm, y % 6 == 0 ? st(Blocks.ORANGE_CONCRETE) : yellow);
+        for (int y = mh + 1; y <= mh + 3; y++) bp.set(xm, y, zm, yellow);
+        bp.set(xm, mh + 4, zm, st(Blocks.LIGHTNING_ROD));
+        int zEnd = Math.max(-Blueprint.M + 1, fz0 - 2);
+        for (int z = zm - 1; z >= zEnd; z--) bp.set(xm, mh, z, yellow);
+        for (int z = zm + 1; z <= Math.min(zm + 4, D + Blueprint.M - 1); z++) bp.set(xm, mh, z, yellow);
+        bp.set(xm, mh - 1, Math.min(zm + 3, D + Blueprint.M - 1), gray);
+        bp.set(xm, mh - 1, Math.min(zm + 4, D + Blueprint.M - 1), gray);
+        bp.set(xm, mh - 1, zm - 1, st(Blocks.LIGHT_BLUE_STAINED_GLASS));
+        bp.set(xm, mh - 2, zm - 1, st(Blocks.WHITE_CONCRETE));
+        int zh = (zm + zEnd) / 2;
+        int hookY = Math.max(topY + 4, mh - 12);
+        for (int y = hookY + 1; y < mh; y++) bp.set(xm, y, zh, st(Blocks.CHAIN));
+        bp.set(xm, hookY, zh, st(Blocks.STONE_BRICKS));
     }
 
     // =====================================================================

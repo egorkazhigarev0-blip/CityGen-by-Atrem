@@ -18,6 +18,8 @@ public class Plan {
     public int balconies; // 0 нет, 1 местами, 2 везде
     public int windowWidth; // 0 = авто
     public boolean fireEscape;
+    public boolean underConstruction; // строящееся здание: каркас, леса, кран
+    public int quarter = -1;          // индекс квартала города
     public int floors, floorH, groundH;
     public int w, d;
     public boolean party; // соседи вплотную — боковые стены глухие

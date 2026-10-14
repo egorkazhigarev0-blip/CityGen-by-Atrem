@@ -12,19 +12,23 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import java.util.*;
 
 /**
- * Раскладка участков. Полностью детерминирована (сид + позиция + направление),
+ * Раскладка участков. Полностью детерминирована (сид + позиция + направление + кварталы),
  * поэтому клиент рисует превью ровно там, где сервер потом построит.
- * Система координат участка: u — вправо от игрока, v — вперёд по взгляду.
+ * Для «Ряда» и «Улицы» используется система координат игрока: u — вправо, v — вперёд по взгляду.
+ * Кварталы «Города» заданы прямо в мировых координатах.
  */
 public class Layout {
     public static final int SIDEWALK = 0, ROAD = 1;
+    /** Ширина полос вокруг квартала: тротуар 3 + дорога 7. Два квартала с зазором 13 делят одну дорогу. */
+    public static final int WALK = 3, ROAD_W = 7, SHARED_GAP = WALK * 2 + ROAD_W;
 
+    /** Полоса дороги или тротуара в мировых координатах. */
     public static class Strip {
-        public final int u0, u1, v0, v1, kind, lampCross;
-        public final boolean alongU;
-        Strip(int u0, int u1, int v0, int v1, int kind, boolean alongU, int lampCross) {
-            this.u0 = Math.min(u0, u1); this.u1 = Math.max(u0, u1); this.v0 = Math.min(v0, v1); this.v1 = Math.max(v0, v1);
-            this.kind = kind; this.alongU = alongU; this.lampCross = lampCross;
+        public final int minX, minZ, maxX, maxZ, kind, quarter;
+        public int y;
+        public Strip(int x0, int z0, int x1, int z1, int kind, int quarter, int y) {
+            this.minX = Math.min(x0, x1); this.maxX = Math.max(x0, x1); this.minZ = Math.min(z0, z1); this.maxZ = Math.max(z0, z1);
+            this.kind = kind; this.quarter = quarter; this.y = y;
         }
     }
 
@@ -36,6 +40,7 @@ public class Layout {
     public final int streetY;
     public final int offset;
     public int warnings; // сколько зданий пришлось урезать по высоте
+    public int[] quarterGround = new int[0];
 
     private final GenSettings s;
     private final boolean sharedDecisions;
@@ -62,6 +67,12 @@ public class Layout {
                 anchor.getZ() + right.getStepZ() * u + look.getStepZ() * v);
     }
 
+    /** Полоса в системе координат игрока → мировой прямоугольник. */
+    private void siteStrip(int u0, int u1, int v0, int v1, int kind) {
+        BlockPos a = site(u0, v0, 0), b = site(u1, v1, 0);
+        strips.add(new Strip(a.getX(), a.getZ(), b.getX(), b.getZ(), kind, -1, streetY));
+    }
+
     public static Layout compute(GenSettings src, BlockPos anchor, Direction look, Level level) {
         GenSettings s = src.copy().sanitize();
         Direction lk = look.getAxis().isHorizontal() ? look : Direction.NORTH;
@@ -72,18 +83,31 @@ public class Layout {
         switch (s.arrangement) {
             case ROW -> L.arrangeRow();
             case STREET -> L.arrangeStreet();
-            case PLANNER -> L.arrangePlanner();
+            case CITY -> L.arrangeCity();
         }
 
+        // уровень земли: по игроку, по рельефу участка, а в городе — по рельефу всего квартала
+        boolean terrain = s.ground == GroundMode.TERRAIN && level != null;
+        L.quarterGround = new int[s.quarters.size()];
+        for (int qi = 0; qi < s.quarters.size(); qi++) {
+            Quarter q = s.quarters.get(qi);
+            // кварталы города всегда стоят на своём рельефе: они могут быть далеко от игрока
+            L.quarterGround[qi] = level != null ? groundLevel(level, q.x0, q.z0, q.x1, q.z1, groundY) : groundY;
+        }
+        harmonize(s.quarters, L.quarterGround);
+        for (int qi = 0; qi < s.quarters.size(); qi++) L.quarterGround[qi] += s.quarters.get(qi).raise;
         int maxY = level == null ? 318 : level.getMaxBuildHeight() - 2;
         for (Plan p : L.plans) {
-            p.baseY = s.ground == GroundMode.TERRAIN && level != null ? groundLevel(level, p.minX, p.minZ, p.maxX, p.maxZ) : groundY;
+            if (p.quarter >= 0) p.baseY = L.quarterGround[p.quarter];
+            else p.baseY = terrain ? groundLevel(level, p.minX, p.minZ, p.maxX, p.maxZ, groundY) : groundY;
             int orig = p.floors;
             while (p.floors > 1 && p.baseY + p.estimatedHeight() > maxY) p.floors--;
             if (p.floors != orig) L.warnings++;
         }
         for (LotPlan lp : L.lots)
-            lp.baseY = s.ground == GroundMode.TERRAIN && level != null ? groundLevel(level, lp.minX, lp.minZ, lp.maxX, lp.maxZ) : groundY;
+            lp.baseY = lp.quarter >= 0 ? L.quarterGround[lp.quarter]
+                    : terrain ? groundLevel(level, lp.minX, lp.minZ, lp.maxX, lp.maxZ, groundY) : groundY;
+        for (Strip st : L.strips) if (st.quarter >= 0) st.y = L.quarterGround[st.quarter];
         return L;
     }
 
@@ -148,6 +172,7 @@ public class Layout {
             if ((p.roof == RoofType.HIP || p.roof == RoofType.GABLE) && m > 24) p.roof = RoofType.FLAT;
             if (p.roof == RoofType.CONE && m > 20 && p.shape != Shape.TAPER && p.shape != Shape.TWIST) p.roof = RoofType.DOME;
         }
+        p.underConstruction = new Random(p.seed ^ 0xC0457L).nextInt(100) < s.construction;
         return p;
     }
 
@@ -288,7 +313,7 @@ public class Layout {
     }
 
     // =====================================================================
-    // Схемы расстановки
+    // Схемы расстановки: ряд и улица
     // =====================================================================
     private int frontage(StreetMode m) { return switch (m) { case NONE -> 0; case SIDEWALK -> 3; case ROAD -> 13; }; }
 
@@ -333,85 +358,260 @@ public class Layout {
             vEnd = Math.max(vEnd, Math.max(vl, vr));
         }
         int v0 = s.distance - 2, v1 = vEnd + 2;
-        if (s.street == StreetMode.SIDEWALK) strips.add(new Strip(-3, 3, v0, v1, SIDEWALK, false, -3));
+        if (s.street == StreetMode.SIDEWALK) siteStrip(-3, 3, v0, v1, SIDEWALK);
         else if (s.street == StreetMode.ROAD) {
-            strips.add(new Strip(-3, 3, v0, v1, ROAD, false, Integer.MIN_VALUE));
-            strips.add(new Strip(-6, -4, v0, v1, SIDEWALK, false, -4));
-            strips.add(new Strip(4, 6, v0, v1, SIDEWALK, false, 4));
+            siteStrip(-3, 3, v0, v1, ROAD);
+            siteStrip(-6, -4, v0, v1, SIDEWALK);
+            siteStrip(4, 6, v0, v1, SIDEWALK);
         }
     }
 
-    /** Таблица кварталов: строка 0 — дальняя (верх таблицы), последняя — ближняя к игроку. */
-    private void arrangePlanner() {
-        int R = s.rows, C = s.cols, lotW = s.width, lotD = s.depth;
-        int rowFront = frontage(s.street);
-        int colGap = switch (s.crossStreets) { case NONE -> s.spacing; case SIDEWALK -> 5; case ROAD -> 15; };
-        int total = C * lotW + (C - 1) * colGap;
-        int u0 = -total / 2;
-        int n = s.plannedBuildings(), i = 0;
-        Random mixed = new Random(s.seed ^ 0xC0FFEEL);
-        int front = s.distance + rowFront;
-        int nearFront = front, farBack = front;
-        for (int r = R - 1; r >= 0; r--) {
-            for (int c = 0; c < C; c++) {
-                CellType ct = s.cell(r, c);
-                int lu0 = u0 + c * (lotW + colGap);
-                if (ct == CellType.EMPTY) continue;
-                if (ct == CellType.PARK || ct == CellType.PLAZA || ct == CellType.PARKING) {
-                    BlockPos a = site(lu0, front, 0), b = site(lu0 + lotW - 1, front + lotD - 1, 0);
-                    lots.add(new LotPlan(ct, Math.min(a.getX(), b.getX()), Math.min(a.getZ(), b.getZ()),
-                            Math.max(a.getX(), b.getX()), Math.max(a.getZ(), b.getZ()), look.getOpposite(), s.seed + r * 131L + c));
-                    continue;
-                }
-                BuildingType t = ct == CellType.AUTO
-                        ? (s.type == BuildingType.MIXED ? mixedPool(mixed) : s.type)
-                        : ct.building();
-                boolean userSize = ct == CellType.AUTO;
-                double tp = C <= 1 ? 0.5 : c / (double) (C - 1);
-                int ord = s.heightProfile == HeightProfile.PEAK
-                        ? (int) Math.round((1 - Math.max(Math.abs(2 * tp - 1), R <= 1 ? 0 : Math.abs(2 * r / (double) (R - 1) - 1))) * (n - 1))
-                        : (int) Math.round(tp * (n - 1));
-                if (t == BuildingType.TOWNHOUSE) {
-                    int k = Math.max(1, lotW / 7), uw = lotW / k;
-                    for (int j = 0; j < k; j++) {
-                        Plan p = makePlan(t, ord, n, userSize, uw, lotD);
-                        p.party = k > 1;
-                        int w = j == k - 1 ? lotW - uw * (k - 1) : uw;
-                        int a0 = lu0 + j * uw;
-                        int d = Math.min(p.d, lotD);
-                        setLot(p, a0, a0 + w - 1, front, front + d - 1, look.getOpposite());
-                        plans.add(p);
-                        i++;
-                    }
-                    continue;
-                }
-                Plan p = makePlan(t, ord, n, userSize, lotW - 2 * (t == BuildingType.HOUSE && s.yards ? 2 : 0), lotD);
-                int w = Math.min(p.w, lotW - 2 * p.yardSide);
-                int d = Math.min(p.d, lotD - p.yardFront);
-                if (d < t.minD) { p.yardFront = 0; d = Math.min(p.d, lotD); }
-                int a0 = lu0 + (lotW - w) / 2;
-                setLot(p, a0, a0 + w - 1, front + p.yardFront, front + p.yardFront + d - 1, look.getOpposite());
-                plans.add(p);
-                i++;
-            }
-            addFrontStrips(u0 - 2, u0 + total + 1, front, s.street);
-            farBack = front + lotD;
-            front += lotD + Math.max(rowFront, s.spacing) + (rowFront == 0 ? 0 : 0);
+    private void addFrontStrips(int uMin, int uMax, int front, StreetMode mode) {
+        if (mode == StreetMode.SIDEWALK) {
+            siteStrip(uMin, uMax, front - 3, front - 1, SIDEWALK);
+        } else if (mode == StreetMode.ROAD) {
+            siteStrip(uMin, uMax, front - 3, front - 1, SIDEWALK);
+            siteStrip(uMin, uMax, front - 10, front - 4, ROAD);
+            siteStrip(uMin, uMax, front - 13, front - 11, SIDEWALK);
         }
-        // поперечные улицы между столбцами
-        if (s.crossStreets != StreetMode.NONE && C > 1) {
-            for (int c = 0; c < C - 1; c++) {
-                int g0 = u0 + (c + 1) * lotW + c * colGap, g1 = g0 + colGap - 1;
-                int v0 = nearFront - rowFront, v1 = farBack;
-                if (s.crossStreets == StreetMode.SIDEWALK) {
-                    strips.add(new Strip(g0, g1, v0, v1, SIDEWALK, false, g0));
-                } else {
-                    strips.add(new Strip(g0, g0 + 2, v0, v1, SIDEWALK, false, g0));
-                    strips.add(new Strip(g0 + 3, g1 - 3, v0, v1, ROAD, false, Integer.MIN_VALUE));
-                    strips.add(new Strip(g1 - 2, g1, v0, v1, SIDEWALK, false, g1));
-                }
+    }
+
+    // =====================================================================
+    // Город: свободные кварталы
+    // =====================================================================
+    /** Параметры типа квартала. */
+    record KindSpec(BuildingType[] pool, int lotW, int lotD, int spacing, QFacing facing, CellType court, int parkChance) {}
+
+    static KindSpec spec(QuarterKind k, GenSettings s) {
+        BuildingType S = BuildingType.SKYSCRAPER, O = BuildingType.OFFICE, H = BuildingType.HIGHRISE, M = BuildingType.MIDRISE,
+                T = BuildingType.TOWNHOUSE, D = BuildingType.HOUSE, C = BuildingType.COMMERCIAL, V = BuildingType.CIVIC;
+        return switch (k) {
+            case DOWNTOWN -> new KindSpec(new BuildingType[]{S, S, O, O, O, H}, 28, 28, 5, QFacing.AUTO, CellType.PLAZA, 0);
+            case RESIDENTIAL -> new KindSpec(new BuildingType[]{H, H, M, M, M}, 26, 16, 6, QFacing.AUTO, CellType.PARK, 7);
+            case HISTORIC -> new KindSpec(new BuildingType[]{M, M, M, M, M, V}, 18, 15, 0, QFacing.PERIMETER, CellType.PARK, 0);
+            case TOWNHOUSES -> new KindSpec(new BuildingType[]{T}, 7, 12, 0, QFacing.AUTO, CellType.PARK, 0);
+            case SUBURB -> new KindSpec(new BuildingType[]{D}, 15, 15, 2, QFacing.AUTO, CellType.PARK, 5);
+            case COMMERCIAL -> new KindSpec(new BuildingType[]{C, C, M}, 40, 26, 6, QFacing.AUTO, CellType.PARKING, 0);
+            case CULTURE -> new KindSpec(new BuildingType[]{V, V, M}, 30, 22, 8, QFacing.AUTO, CellType.PLAZA, 0);
+            case CONSTRUCTION -> new KindSpec(new BuildingType[]{H, O, M}, 26, 18, 8, QFacing.AUTO, CellType.EMPTY, 0);
+            case CUSTOM -> new KindSpec(s.type == BuildingType.MIXED ? new BuildingType[]{M, M, H, O, C, V} : new BuildingType[]{s.type},
+                    s.width, s.depth, s.spacing, QFacing.AUTO, CellType.PARK, 0);
+            default -> new KindSpec(new BuildingType[]{M, M, M, H, O, C}, 22, 18, 4, QFacing.AUTO, CellType.PARK, 6);
+        };
+    }
+
+    private void arrangeCity() {
+        for (int qi = 0; qi < s.quarters.size(); qi++) {
+            if (s.buildOnly >= 0 && s.buildOnly != qi) continue;
+            arrangeQuarter(s.quarters.get(qi), qi);
+        }
+    }
+
+    private void arrangeQuarter(Quarter q, int qi) {
+        Random r = new Random(s.seed * 31 + q.seed * 1000003L + qi * 7919L);
+        // кольцо улиц вокруг квартала
+        if (q.street != StreetMode.NONE) {
+            int a = WALK;
+            strips.add(new Strip(q.x0 - a, q.z0 - a, q.x1 + a, q.z0 - 1, SIDEWALK, qi, streetY));
+            strips.add(new Strip(q.x0 - a, q.z1 + 1, q.x1 + a, q.z1 + a, SIDEWALK, qi, streetY));
+            strips.add(new Strip(q.x0 - a, q.z0, q.x0 - 1, q.z1, SIDEWALK, qi, streetY));
+            strips.add(new Strip(q.x1 + 1, q.z0, q.x1 + a, q.z1, SIDEWALK, qi, streetY));
+            if (q.street == StreetMode.ROAD) {
+                int b = WALK + ROAD_W;
+                strips.add(new Strip(q.x0 - b, q.z0 - b, q.x1 + b, q.z0 - a - 1, ROAD, qi, streetY));
+                strips.add(new Strip(q.x0 - b, q.z1 + a + 1, q.x1 + b, q.z1 + b, ROAD, qi, streetY));
+                strips.add(new Strip(q.x0 - b, q.z0 - a, q.x0 - a - 1, q.z1 + a, ROAD, qi, streetY));
+                strips.add(new Strip(q.x1 + a + 1, q.z0 - a, q.x1 + b, q.z1 + a, ROAD, qi, streetY));
             }
         }
+        if (q.kind.open()) {
+            CellType ct = q.kind == QuarterKind.PARK ? CellType.PARK : q.kind == QuarterKind.PLAZA ? CellType.PLAZA : CellType.PARKING;
+            addLot(ct, q.x0, q.z0, q.x1, q.z1, Direction.NORTH, r.nextLong(), qi);
+            return;
+        }
+        KindSpec sp = spec(q.kind, s);
+        StyleMode style = quarterStyle(q, r);
+        int rowD = q.lotDepth > 0 ? q.lotDepth : sp.lotD;
+        int spacing = q.spacing >= 0 ? q.spacing : sp.spacing;
+        QFacing f = q.facing != QFacing.AUTO ? q.facing : sp.facing;
+        if (f == QFacing.AUTO) f = q.w() >= q.d() ? QFacing.NORTH_SOUTH : QFacing.WEST_EAST;
+        int across = (f == QFacing.WEST_EAST || f == QFacing.WEST || f == QFacing.EAST) ? q.w() : q.d();
+        if ((f == QFacing.NORTH_SOUTH || f == QFacing.WEST_EAST || f == QFacing.PERIMETER) && across < 2 * 9)
+            f = f == QFacing.WEST_EAST ? QFacing.WEST : QFacing.NORTH;
+        boolean two = f == QFacing.NORTH_SOUTH || f == QFacing.WEST_EAST || f == QFacing.PERIMETER;
+        rowD = Math.max(7, Math.min(rowD, two ? across / 2 : across));
+        CellType court = switch (q.courtyard) {
+            case NONE -> CellType.EMPTY; case GARDEN -> CellType.PARK; case PARKING -> CellType.PARKING; default -> sp.court;
+        };
+        int gx0 = q.x0, gz0 = q.z0, gx1 = q.x1, gz1 = q.z1; // остаток под двор
+        switch (f) {
+            case NORTH_SOUTH, PERIMETER -> {
+                int dn = fillRow(q, qi, sp, style, r, Direction.NORTH, q.x0, q.x1, q.z0, rowD, spacing);
+                int ds = fillRow(q, qi, sp, style, r, Direction.SOUTH, q.x0, q.x1, q.z1, rowD, spacing);
+                gz0 = q.z0 + dn; gz1 = q.z1 - ds;
+                if (f == QFacing.PERIMETER && q.d() - 2 * rowD >= 9) {
+                    int sideGap = spacing > 0 ? spacing : 0;
+                    int dw = fillRow(q, qi, sp, style, r, Direction.WEST, q.z0 + rowD + sideGap, q.z1 - rowD - sideGap, q.x0, rowD, spacing);
+                    int de = fillRow(q, qi, sp, style, r, Direction.EAST, q.z0 + rowD + sideGap, q.z1 - rowD - sideGap, q.x1, rowD, spacing);
+                    gx0 = q.x0 + dw; gx1 = q.x1 - de;
+                    gz0 = q.z0 + rowD; gz1 = q.z1 - rowD;
+                }
+            }
+            case WEST_EAST -> {
+                int dw = fillRow(q, qi, sp, style, r, Direction.WEST, q.z0, q.z1, q.x0, rowD, spacing);
+                int de = fillRow(q, qi, sp, style, r, Direction.EAST, q.z0, q.z1, q.x1, rowD, spacing);
+                gx0 = q.x0 + dw; gx1 = q.x1 - de;
+            }
+            case NORTH -> gz0 = q.z0 + fillRow(q, qi, sp, style, r, Direction.NORTH, q.x0, q.x1, q.z0, rowD, spacing);
+            case SOUTH -> gz1 = q.z1 - fillRow(q, qi, sp, style, r, Direction.SOUTH, q.x0, q.x1, q.z1, rowD, spacing);
+            case WEST -> gx0 = q.x0 + fillRow(q, qi, sp, style, r, Direction.WEST, q.z0, q.z1, q.x0, rowD, spacing);
+            default -> gx1 = q.x1 - fillRow(q, qi, sp, style, r, Direction.EAST, q.z0, q.z1, q.x1, rowD, spacing);
+        }
+        // двор: отступ 3 блока от задних фасадов (там балконы и лестницы)
+        int inset = 3;
+        if (court != CellType.EMPTY && gx1 - gx0 - 2 * inset >= 8 && gz1 - gz0 - 2 * inset >= 8)
+            addLot(court, gx0 + inset, gz0 + inset, gx1 - inset, gz1 - inset, Direction.NORTH, r.nextLong(), qi);
+    }
+
+    private StyleMode quarterStyle(Quarter q, Random r) {
+        if (q.style != StyleMode.AUTO) return q.style;
+        if (s.style != StyleMode.AUTO) return s.style;
+        float x = r.nextFloat();
+        return switch (q.kind) {
+            case HISTORIC -> StyleMode.CLASSIC;
+            case CULTURE -> x < 0.6f ? StyleMode.ANTIQUE : StyleMode.CLASSIC;
+            case TOWNHOUSES -> x < 0.75f ? StyleMode.CLASSIC : StyleMode.MODERN;
+            case DOWNTOWN, COMMERCIAL, CONSTRUCTION -> x < 0.85f ? StyleMode.MODERN : StyleMode.CLASSIC;
+            default -> x < 0.55f ? StyleMode.MODERN : StyleMode.CLASSIC;
+        };
+    }
+
+    /**
+     * Ряд участков вдоль улицы. face — куда смотрят фасады; a0..a1 — диапазон вдоль улицы;
+     * front — координата линии фасадов (z для N/S, x для W/E); участки уходят вглубь на rowD.
+     */
+    /** @return фактическая глубина ряда (до самого глубокого заднего фасада) — остальное отдаётся двору. */
+    private int fillRow(Quarter q, int qi, KindSpec sp, StyleMode style, Random r, Direction face,
+                        int a0, int a1, int front, int rowD, int spacing) {
+        int cursor = a0, used = 0;
+        while (cursor <= a1) {
+            int remaining = a1 - cursor + 1;
+            if (remaining < 6) break;
+            if (sp.parkChance > 0 && remaining >= 14 && r.nextInt(100) < sp.parkChance) {
+                int w = Math.min(remaining, 12 + r.nextInt(8));
+                addRowLot(CellType.PARK, face, cursor, cursor + w - 1, front, Math.min(rowD, 14), r.nextLong(), qi);
+                used = Math.max(used, Math.min(rowD, 14));
+                cursor += w + Math.max(spacing, 1);
+                continue;
+            }
+            BuildingType t = sp.pool[r.nextInt(sp.pool.length)];
+            int desired;
+            if (t == BuildingType.TOWNHOUSE) desired = (q.lotWidth > 0 ? q.lotWidth : 6 + r.nextInt(3));
+            else {
+                int base = q.lotWidth > 0 ? q.lotWidth : (q.kind == QuarterKind.CUSTOM || t == sp.pool[0] && sp.lotW > 0 ? sp.lotW : t.defW);
+                desired = (int) Math.round(base * (0.85 + r.nextDouble() * 0.3));
+            }
+            int minW = Math.min(t.minW, remaining);
+            int w = Mth.clamp(desired, minW, remaining);
+            if (remaining - w - spacing < Math.max(6, t.minW)) w = remaining; // хвост — в этот же участок
+            if (w < t.minW) { t = BuildingType.TOWNHOUSE; if (w < t.minW) break; }
+
+            int fmin, fmax;
+            if (q.floorsMin > 0 || q.floorsMax > 0) {
+                fmin = Math.max(1, Math.min(q.floorsMin > 0 ? q.floorsMin : 1, q.floorsMax > 0 ? q.floorsMax : 80));
+                fmax = Math.max(fmin, q.floorsMax > 0 ? q.floorsMax : fmin + 3);
+            } else if (q.kind == QuarterKind.CUSTOM && s.type != BuildingType.MIXED) {
+                fmin = Math.min(s.floorsMin, s.floorsMax); fmax = Math.max(s.floorsMin, s.floorsMax);
+            } else { fmin = t.defMin; fmax = t.defMax; }
+            double frac = switch (q.heights) {
+                case EQUAL -> new Random(q.seed * 7919L + qi).nextDouble();
+                case PEAK -> {
+                    double cu = cursor + w / 2.0;
+                    double ac = face == Direction.NORTH || face == Direction.WEST ? front + rowD / 2.0 : front - rowD / 2.0;
+                    double cx = face.getAxis() == Direction.Axis.Z ? cu : ac, cz = face.getAxis() == Direction.Axis.Z ? ac : cu;
+                    double dx = (cx - (q.x0 + q.x1) / 2.0) / (q.w() / 2.0), dz = (cz - (q.z0 + q.z1) / 2.0) / (q.d() / 2.0);
+                    yield Mth.clamp(1.0 - Math.sqrt(dx * dx + dz * dz) / 1.25, 0, 1) * 0.85 + r.nextDouble() * 0.15;
+                }
+                case RISING -> {
+                    double cx = face.getAxis() == Direction.Axis.Z ? cursor + w / 2.0 : front;
+                    yield Mth.clamp((cx - q.x0) / (double) Math.max(1, q.w()), 0, 1) * 0.85 + r.nextDouble() * 0.15;
+                }
+                default -> -1;
+            };
+            Plan p = quarterPlan(t, style, fmin, fmax, r, qi);
+            if (frac >= 0) p.floors = Mth.clamp(fmin + (int) Math.round(frac * (fmax - fmin)), fmin, fmax);
+            if (q.ground != GroundFloor.AUTO && !t.small()) {
+                p.ground = q.ground;
+                if (p.ground == GroundFloor.SHOPS || p.ground == GroundFloor.LOBBY) p.groundH = Math.max(p.groundH, 5);
+            }
+            if (q.construction >= 0) p.underConstruction = new Random(p.seed ^ 0xC0457L).nextInt(100) < q.construction;
+            if (q.kind == QuarterKind.CONSTRUCTION) p.underConstruction = true;
+            int yf = p.yardFront, ys = p.yardSide;
+            if (w - 2 * ys < t.minW) ys = 0;
+            if (rowD - yf < t.minD) yf = 0;
+            p.yardFront = yf; p.yardSide = ys;
+            int bw = w - 2 * ys;
+            int bd = Math.max(t.minD, Math.min(rowD - yf, (int) Math.round(t.defD * (0.9 + r.nextDouble() * 0.25))));
+            if (q.lotDepth > 0 || q.kind == QuarterKind.CUSTOM) bd = Math.max(t.minD, rowD - yf);
+            bd = Math.min(bd, rowD - yf);
+            p.party = spacing < 2;
+            int s0 = cursor + ys, s1 = cursor + ys + bw - 1;
+            switch (face) {
+                case NORTH -> p.place(s0, front + yf, s1, front + yf + bd - 1, face);
+                case SOUTH -> p.place(s0, front - yf - bd + 1, s1, front - yf, face);
+                case WEST -> p.place(front + yf, s0, front + yf + bd - 1, s1, face);
+                default -> p.place(front - yf - bd + 1, s0, front - yf, s1, face);
+            }
+            adjustRoof(p);
+            plans.add(p);
+            used = Math.max(used, yf + bd);
+            cursor += w + spacing;
+        }
+        return used;
+    }
+
+    private void addRowLot(CellType ct, Direction face, int a0, int a1, int front, int depth, long seed, int qi) {
+        switch (face) {
+            case NORTH -> addLot(ct, a0, front, a1, front + depth - 1, face, seed, qi);
+            case SOUTH -> addLot(ct, a0, front - depth + 1, a1, front, face, seed, qi);
+            case WEST -> addLot(ct, front, a0, front + depth - 1, a1, face, seed, qi);
+            default -> addLot(ct, front - depth + 1, a0, front, a1, face, seed, qi);
+        }
+    }
+
+    private void addLot(CellType ct, int x0, int z0, int x1, int z1, Direction face, long seed, int qi) {
+        LotPlan lp = new LotPlan(ct, Math.min(x0, x1), Math.min(z0, z1), Math.max(x0, x1), Math.max(z0, z1), face, seed);
+        lp.quarter = qi;
+        lots.add(lp);
+    }
+
+    /** План здания для квартала: стиль квартала, палитра и детали — свои у каждого дома. */
+    private Plan quarterPlan(BuildingType t, StyleMode style, int fmin, int fmax, Random r, int qi) {
+        Plan p = new Plan();
+        p.index = nextIndex++;
+        p.type = t;
+        p.quarter = qi;
+        p.seed = r.nextLong();
+        p.style = style;
+        Random dec = new Random(p.seed);
+        p.paletteId = s.palette >= 0 ? s.palette : Palettes.pick(style, t, dec);
+        p.wallVariant = dec.nextInt(16);
+        p.wall2Variant = dec.nextInt(16);
+        resolveLook(p, s, dec);
+        p.floors = fmin + dec.nextInt(Math.max(1, fmax - fmin + 1));
+        if (p.roof == RoofType.MANSARD && p.floors < 2) p.roof = RoofType.FLAT;
+        p.w = t.defW; p.d = t.defD;
+        if (t == BuildingType.HOUSE && s.yards) { p.yardFront = 5; p.yardSide = 2; }
+        p.underConstruction = dec.nextInt(100) < s.construction;
+        return p;
+    }
+
+    private void adjustRoof(Plan p) {
+        if (s.roof != RoofType.AUTO) return;
+        int m = Math.min(p.w, p.d);
+        if (p.roof == RoofType.PEDIMENT && m > 26) p.roof = RoofType.FLAT;
+        if ((p.roof == RoofType.HIP || p.roof == RoofType.GABLE) && m > 24) p.roof = RoofType.FLAT;
+        if (p.roof == RoofType.CONE && m > 20 && p.shape != Shape.TAPER && p.shape != Shape.TWIST) p.roof = RoofType.DOME;
     }
 
     private static BuildingType mixedPool(Random r) {
@@ -437,16 +637,6 @@ public class Layout {
             }
         }
         return types;
-    }
-
-    private void addFrontStrips(int uMin, int uMax, int front, StreetMode mode) {
-        if (mode == StreetMode.SIDEWALK) {
-            strips.add(new Strip(uMin, uMax, front - 3, front - 1, SIDEWALK, true, front - 3));
-        } else if (mode == StreetMode.ROAD) {
-            strips.add(new Strip(uMin, uMax, front - 3, front - 1, SIDEWALK, true, front - 3));
-            strips.add(new Strip(uMin, uMax, front - 10, front - 4, ROAD, true, Integer.MIN_VALUE));
-            strips.add(new Strip(uMin, uMax, front - 13, front - 11, SIDEWALK, true, front - 11));
-        }
     }
 
     private void setLot(Plan p, int u0, int u1, int v0, int v1, Direction facing) {
@@ -476,7 +666,9 @@ public class Layout {
     }
 
     public static int surfaceY(Level level, int x, int z) {
-        int y = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) - 1;
+        // на сервере чанк догружается: у незагруженного чанка Level.getHeight вернул бы дно мира
+        int y = level.isClientSide ? level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) - 1
+                : level.getChunk(x >> 4, z >> 4).getHeight(Heightmap.Types.WORLD_SURFACE, x & 15, z & 15);
         int min = level.getMinBuildHeight();
         BlockPos.MutableBlockPos mp = new BlockPos.MutableBlockPos();
         while (y > min) {
@@ -486,11 +678,44 @@ public class Layout {
         return y;
     }
 
-    private static int groundLevel(Level level, int minX, int minZ, int maxX, int maxZ) {
+    /**
+     * Соседние кварталы (делящие улицу) с небольшим перепадом высот ставятся на общий уровень — иначе на стыке
+     * общей дороги появляются ступеньки. Кварталы на заметно другой высоте (холм, обрыв) остаются на своём уровне.
+     */
+    static void harmonize(List<Quarter> qs, int[] ground) {
+        int n = qs.size();
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++) {
+                Quarter a = qs.get(i), b = qs.get(j);
+                int gx = Math.max(b.x0 - a.x1 - 1, a.x0 - b.x1 - 1), gz = Math.max(b.z0 - a.z1 - 1, a.z0 - b.z1 - 1);
+                if (Math.max(gx, gz) <= SHARED_GAP + 8 && Math.abs(ground[i] - ground[j]) <= 8) parent[find(parent, i)] = find(parent, j);
+            }
+        Map<Integer, List<Integer>> groups = new HashMap<>();
+        for (int i = 0; i < n; i++) groups.computeIfAbsent(find(parent, i), k -> new ArrayList<>()).add(i);
+        for (List<Integer> g : groups.values()) {
+            if (g.size() < 2) continue;
+            List<Integer> ys = new ArrayList<>();
+            for (int i : g) ys.add(ground[i]);
+            Collections.sort(ys);
+            int m = ys.get(ys.size() / 2);
+            for (int i : g) if (Math.abs(ground[i] - m) <= 6) ground[i] = m;
+        }
+    }
+
+    private static int find(int[] p, int i) { while (p[i] != i) { p[i] = p[p[i]]; i = p[i]; } return i; }
+
+    /** Медиана высоты земли по сетке 5×5. На клиенте незагруженные чанки пропускаются (fallback — уровень игрока). */
+    public static int groundLevel(Level level, int minX, int minZ, int maxX, int maxZ, int fallback) {
         List<Integer> ys = new ArrayList<>();
         for (int i = 0; i <= 4; i++)
-            for (int j = 0; j <= 4; j++)
-                ys.add(surfaceY(level, minX + (maxX - minX) * i / 4, minZ + (maxZ - minZ) * j / 4));
+            for (int j = 0; j <= 4; j++) {
+                int x = minX + (maxX - minX) * i / 4, z = minZ + (maxZ - minZ) * j / 4;
+                if (level.isClientSide && !level.hasChunk(x >> 4, z >> 4)) continue;
+                ys.add(surfaceY(level, x, z));
+            }
+        if (ys.isEmpty()) return fallback;
         Collections.sort(ys);
         return ys.get(ys.size() / 2);
     }

@@ -32,6 +32,7 @@ class InteriorGenerator {
     private int[][] state;
     private boolean[][] occ;
     private boolean[][] clear;
+    private List<int[]> floorSeeds = List.of();
 
     private static final class Room {
         final List<int[]> cells = new ArrayList<>();
@@ -108,14 +109,95 @@ class InteriorGenerator {
                     }
             if (!any) continue;
             for (int[] k : g.keepClear) if (k[0] == i && k[1] >= 0 && k[2] >= 0 && k[1] < W && k[2] < D) clear[k[1]][k[2]] = true;
+            // вдоль лестничных маршей и стремянок — проход, а не перегородка
+            for (int x = 0; x < W; x++)
+                for (int z = 0; z < D; z++) {
+                    if (state[x][z] != FLOOR) continue;
+                    for (Direction dd : HORIZ) {
+                        int ax = x + dd.getStepX(), az = z + dd.getStepZ();
+                        if (ax >= 0 && az >= 0 && ax < W && az < D && g.reserved[i][ax][az]) clear[x][z] = true;
+                    }
+                }
 
             partition(u);
             connect();
+            floorSeeds = seeds(); // до writePartitions: клетки у межкомнатных дверей семенами не считаются
             writePartitions(u);
             List<Room> rooms = rooms();
             lights(rooms);
-            if (furnish) furnishFloor(u, rooms);
+            if (furnish) { furnishFloor(u, rooms); unblock(); }
         }
+    }
+
+    // =====================================================================
+    // Проходимость: мебель не должна отрезать комнаты, двери и лестницы
+    // =====================================================================
+    private boolean walkable(int x, int z) {
+        int s0 = st(x, z);
+        if (s0 != FLOOR && s0 != DOOR) return false;
+        if (!occ[x][z]) return true;
+        BlockState b = bp.get(x, y0 + 1, z);
+        return b == null || b.isAir() || b.is(net.minecraft.tags.BlockTags.WOOL_CARPETS) || b.is(Blocks.MOSS_CARPET)
+                || b.getBlock() instanceof net.minecraft.world.level.block.BasePressurePlateBlock;
+    }
+
+    private boolean[][] floodWalk(List<int[]> seeds) {
+        boolean[][] r = new boolean[W][D];
+        ArrayDeque<int[]> q = new ArrayDeque<>();
+        for (int[] c : seeds) if (walkable(c[0], c[1]) && !r[c[0]][c[1]]) { r[c[0]][c[1]] = true; q.add(c); }
+        while (!q.isEmpty()) {
+            int[] c = q.poll();
+            for (Direction dd : HORIZ) {
+                int x = c[0] + dd.getStepX(), z = c[1] + dd.getStepZ();
+                if (x >= 0 && z >= 0 && x < W && z < D && !r[x][z] && walkable(x, z)) { r[x][z] = true; q.add(new int[]{x, z}); }
+            }
+        }
+        return r;
+    }
+
+    /** Убирает предметы, которые отрезают часть этажа от входа и лестницы. */
+    private void unblock() {
+        List<int[]> seeds = primary(floorSeeds);
+        boolean[][] should = flood(seeds);
+        for (int guard = 0; guard < 300; guard++) {
+            boolean[][] reach = floodWalk(seeds);
+            boolean lost = false;
+            for (int x = 0; x < W && !lost; x++)
+                for (int z = 0; z < D && !lost; z++)
+                    if (should[x][z] && !occ[x][z] && !reach[x][z]) lost = true;
+            if (!lost) return;
+            int[] victim = null;
+            for (int x = 0; x < W && victim == null; x++)
+                for (int z = 0; z < D && victim == null; z++) {
+                    if (!occ[x][z] || walkable(x, z)) continue;
+                    boolean nearReach = false, nearLost = false;
+                    for (Direction dd : HORIZ) {
+                        int ax = x + dd.getStepX(), az = z + dd.getStepZ();
+                        if (ax < 0 || az < 0 || ax >= W || az >= D) continue;
+                        int sa = state[ax][az];
+                        if (sa != FLOOR && sa != DOOR) continue;
+                        if (reach[ax][az]) nearReach = true; else nearLost = true;
+                    }
+                    if (nearReach && nearLost) victim = new int[]{x, z};
+                }
+            if (victim == null) return;
+            clearFurniture(victim[0], victim[1]);
+        }
+    }
+
+    private void clearFurniture(int x, int z) {
+        for (int dy = 1; dy <= 2; dy++) {
+            BlockState b = bp.get(x, y0 + dy, z);
+            if (b != null && b.getBlock() instanceof net.minecraft.world.level.block.BedBlock) {
+                Direction f = b.getValue(BlockStateProperties.HORIZONTAL_FACING);
+                boolean head = b.getValue(BlockStateProperties.BED_PART) == BedPart.HEAD;
+                int ox = x + (head ? -f.getStepX() : f.getStepX()), oz = z + (head ? -f.getStepZ() : f.getStepZ());
+                bp.set(ox, y0 + dy, oz, AIR);
+                if (ox >= 0 && oz >= 0 && ox < W && oz < D) occ[ox][oz] = false;
+            }
+            bp.set(x, y0 + dy, z, AIR);
+        }
+        occ[x][z] = false;
     }
 
     private Usage usage(int i) {
@@ -181,6 +263,9 @@ class InteriorGenerator {
         for (int t = a; t <= b; t++) {
             int x = alongZ ? c : t, z = alongZ ? t : c;
             if (x < 0 || z < 0 || x >= W || z >= D || state[x][z] != FLOOR) continue;
+            if (clear[x][z]) continue; // перед дверями и лестницами — проём, а не стена
+            // вдоль шахты или наружной стены перегородка только утолщает стену и перекрывает проход
+            if (alongZ ? (st(x - 1, z) != FLOOR || st(x + 1, z) != FLOOR) : (st(x, z - 1) != FLOOR || st(x, z + 1) != FLOOR)) continue;
             state[x][z] = WALLC;
             cells.add(new int[]{x, z});
         }
@@ -195,7 +280,7 @@ class InteriorGenerator {
     private int st(int x, int z) { return (x < 0 || z < 0 || x >= W || z >= D) ? OUT : state[x][z]; }
 
     /** Гарантирует, что из любой комнаты можно дойти до входа или лестницы. */
-    private void connect() {
+    private List<int[]> seeds() {
         List<int[]> seeds = new ArrayList<>();
         for (int x = 0; x < W; x++) for (int z = 0; z < D; z++) {
             if (state[x][z] != FLOOR) continue;
@@ -210,6 +295,32 @@ class InteriorGenerator {
             for (int x = 0; x < W && seeds.isEmpty(); x++) for (int z = 0; z < D && seeds.isEmpty(); z++)
                 if (state[x][z] == FLOOR) seeds.add(new int[]{x, z});
         }
+        return seeds;
+    }
+
+    /** Семя с самой большой связной областью: от него должен быть доступен весь этаж. */
+    private List<int[]> primary(List<int[]> seeds) {
+        int[] best = null;
+        int bestN = -1;
+        boolean[][] done = new boolean[W][D];
+        for (int[] sd : seeds) {
+            if (done[sd[0]][sd[1]]) continue;
+            boolean[][] r = flood(List.of(sd));
+            int n = 0;
+            for (int x = 0; x < W; x++) for (int z = 0; z < D; z++) if (r[x][z]) { n++; done[x][z] = true; }
+            if (n > bestN) { bestN = n; best = sd; }
+        }
+        return best == null ? seeds : List.of(best);
+    }
+
+    private void connect() {
+        List<int[]> seeds = seeds();
+        // сначала весь этаж связываем с главной областью (у лестницы/входа), потом — остатки с любыми проходами
+        connectFrom(primary(seeds));
+        connectFrom(seeds);
+    }
+
+    private void connectFrom(List<int[]> seeds) {
         for (int guard = 0; guard < 400; guard++) {
             boolean[][] reach = flood(seeds);
             int[] best = null;

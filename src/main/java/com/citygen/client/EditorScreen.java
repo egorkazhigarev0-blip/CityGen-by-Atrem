@@ -20,15 +20,15 @@ import java.util.Random;
 
 /** Редактор CityGen: окно с вкладками, живое превью в мире, таблица кварталов и вид сверху. */
 public class EditorScreen extends Screen {
-    public static final String VERSION = "0.2.2";
+    public static final String VERSION = "0.3.0";
     public static final String STEAM = "https://steamcommunity.com/tradeoffer/new/?partner=1869951288&token=joiRehOd";
-    private static final String[] TABS = {"Здания", "Архитектура", "Интерьер", "Участок", "Кварталы", "Вид сверху", "Настройки"};
+    public static final String TELEGRAM = "https://t.me/atremt";
+    private static final String[] TABS = {"Здания", "Архитектура", "Интерьер", "Участок", "Город", "Вид сверху", "Настройки"};
     private static final ItemStack[] ICONS = {new ItemStack(Items.BRICKS), new ItemStack(Items.QUARTZ_PILLAR), new ItemStack(Items.RED_BED),
-            new ItemStack(Items.OAK_SAPLING), new ItemStack(Items.MAP), new ItemStack(Items.SPYGLASS), new ItemStack(Items.COMPARATOR)};
+            new ItemStack(Items.OAK_SAPLING), new ItemStack(Items.FILLED_MAP), new ItemStack(Items.SPYGLASS), new ItemStack(Items.COMPARATOR)};
     private static final int TAB_MAP = 5;
 
     private static int scroll;
-    private static CellType brush = CellType.MIDRISE;
     private static int mapZoom = 1;
     private static double mapCU = -1, mapCV = -1;
 
@@ -57,11 +57,11 @@ public class EditorScreen extends Screen {
     protected void init() {
         content.clear();
         seedBox = null;
-        pw = width < 380 ? width - 4 : Mth.clamp(width - 24, 380, 620);
-        ph = height < 232 ? height - 4 : Mth.clamp(height - 16, 232, 360);
+        pw = width < 380 ? width - 4 : Mth.clamp(width - 24, 380, 640);
+        ph = height < 232 ? height - 4 : Mth.clamp(height - 16, 232, 370);
         px = Mth.clamp((width - pw) / 2 + prefs().panelDX, 0, Math.max(0, width - pw));
         py = Mth.clamp((height - ph) / 2 + prefs().panelDY, 0, Math.max(0, height - ph));
-        side = pw >= 460 ? 100 : 26;
+        side = pw >= 460 ? 108 : 28;
         cx0 = px + side + 8;
         cy0 = py + 28;
         cw = pw - side - 16;
@@ -71,7 +71,7 @@ public class EditorScreen extends Screen {
         // вкладки
         for (int i = 0; i < TABS.length; i++) {
             final int ti = i;
-            Ui.Tab t = new Ui.Tab(px, py + 26 + i * 22, side, 20, TABS[i], ICONS[i], tab == i, () -> { prefs().tab = ti; scroll = 0; rebuild(); });
+            Ui.Tab t = new Ui.Tab(px, py + 30 + i * 23, side, 21, TABS[i], ICONS[i], tab == i, () -> { prefs().tab = ti; scroll = 0; rebuild(); });
             t.help = TABS[i];
             addRenderableWidget(t);
         }
@@ -79,6 +79,8 @@ public class EditorScreen extends Screen {
         addRenderableWidget(new Ui.Button(px + pw - 22, py + 4, 18, 16, "✕", Ui.Button.Kind.GHOST, this::onClose).help("Закрыть (Esc или G)"));
         addRenderableWidget(new Ui.Button(px + pw - 44, py + 4, 20, 16, "♥", Ui.Button.Kind.GHOST, this::openSupport)
                 .help("Поддержать автора — обмен в Steam (откроется браузер после подтверждения)."));
+        addRenderableWidget(new Ui.Button(px + pw - 66, py + 4, 20, 16, "✈", Ui.Button.Kind.GHOST, this::openTelegram)
+                .help("Telegram-канал t.me/atremt — здесь вы можете увидеть ранние версии и следить за модом."));
         // подвал
         int fy = py + ph - 26;
         int bw = Math.min(96, (pw - side - 24) / 4 - 4);
@@ -90,8 +92,12 @@ public class EditorScreen extends Screen {
                 () -> { ClientState.previewActive = !ClientState.previewActive; if (ClientState.previewActive) ClientState.recompute(); rebuild(); })
                 .help("Рамки будущих зданий в мире. Остаются после закрытия окна — можно обойти участок. Белая рамка — сторона входа."));
         bx -= bw + 4;
-        addRenderableWidget(new Ui.Button(bx, fy, bw, 20, "Сюда", Ui.Button.Kind.NORMAL, () -> { ClientState.anchorHere(); rebuild(); })
-                .help("Перенести участок к вам: точка привязки и направление взгляда берутся заново (уровень — земля под ногами)."));
+        boolean cityMode = s().arrangement == Arrangement.CITY && !s().quarters.isEmpty();
+        addRenderableWidget(new Ui.Button(bx, fy, bw, 20, cityMode ? "Город сюда" : "Сюда", Ui.Button.Kind.NORMAL, () -> {
+            if (cityMode) ClientState.moveCityToPlayer(); else ClientState.anchorHere();
+            rebuild();
+        }).help(cityMode ? "Сдвинуть все кварталы так, чтобы город начинался перед вами (расположение кварталов сохранится)."
+                : "Перенести участок к вам: точка привязки и направление взгляда берутся заново (уровень — земля под ногами)."));
         bx -= bw + 4;
         addRenderableWidget(new Ui.Button(bx, fy, bw, 20, "Отменить", Ui.Button.Kind.DANGER, ClientState::undo)
                 .help("Вернуть местность как была до последней постройки (хранятся 5 последних). /citygen cancel — остановить стройку."));
@@ -163,11 +169,11 @@ public class EditorScreen extends Screen {
     private int tabBuildings(int y) {
         GenSettings s = s();
         boolean mixed = s.type == BuildingType.MIXED;
-        boolean planner = s.arrangement == Arrangement.PLANNER;
+        boolean planner = false; // размеры в «Городе» задаются у каждого квартала
         y = heading(y, "Основное");
         Ui.Slider cnt = sld(lx(), y, "Количество", 1, 16, s.count, String::valueOf, v -> s.count = v,
-                "Сколько зданий в режимах «Ряд» и «Улица». В режиме «Кварталы» число задаёт таблица.");
-        cnt.active = !planner;
+                "Сколько зданий в режимах «Ряд» и «Улица». В режиме «Город» здания расставляются по кварталам.");
+        cnt.active = s.arrangement != Arrangement.CITY;
         y = row(y, cnt, cyc(rx(), y, "Тип", BuildingType.values(), s.type, v -> { s.type = v; s.applyTypeDefaults(); rebuild(); }));
         y = row(y, cyc(lx(), y, "Стиль", StyleMode.values(), s.style, v -> s.style = v),
                 cyc(rx(), y, "Различия", Variation.values(), s.variation, v -> s.variation = v));
@@ -223,7 +229,7 @@ public class EditorScreen extends Screen {
                 cyc(rx(), y, "Лестницы", StairsMode.values(), s.stairs, v -> s.stairs = v));
         y = row(y, sld(lx(), y, "Свет в окнах", 0, 100, s.litPercent, v -> v + "%", v -> s.litPercent = v,
                         "Доля освещённых комнат: ночью окна горят неравномерно, как в настоящем городе."),
-                tog(rx(), y, "Лифты", s.elevators, v -> s.elevators = v, "Лифтовые шахты с дверями и кнопками в зданиях от 5 этажей."));
+                tog(rx(), y, "Лифты", s.elevators, v -> s.elevators = v, "Декоративные лифтовые шахты — только в небоскрёбах, офисах и многоэтажках от 10 этажей. В остальных зданиях — лестницы."));
         y = row(y, tog(lx(), y, "Детали на крыше", s.rooftop, v -> s.rooftop = v,
                 "Выход на крышу, вентиляция, панели, баки, антенны, шпили, сады."), null);
         y = heading(y, "Что внутри");
@@ -231,7 +237,8 @@ public class EditorScreen extends Screen {
                 + "Офисы: открытые пространства с рядами столов, переговорные со стеклянными стенами.\n"
                 + "Первые этажи: лобби с ресепшеном, кафе, пекарни, книжные, цветочные, супермаркеты.\n"
                 + "Общественные здания: музеи с экспонатами или библиотеки с рядами стеллажей.\n"
-                + "Высокие дома получают лестничную клетку с маршами и площадками, дома — лестницу вдоль стены.", Ui.SUB);
+                + "Высокие дома получают лестничную клетку с маршами и площадками, дома — лестницу вдоль стены.\n"
+                + "Каждое здание проверяется «виртуальным игроком»: все комнаты и этажи должны быть достижимы.", Ui.SUB);
     }
 
     private int tabSite(int y) {
@@ -273,53 +280,36 @@ public class EditorScreen extends Screen {
 
     private int tabPlanner(int y) {
         GenSettings s = s();
-        if (s.arrangement != Arrangement.PLANNER) {
-            y = text(y, "§eРежим кварталов выключен.§7 Сейчас схема «" + s.arrangement.label() + "». "
-                    + "Включите его, чтобы строить по таблице: каждая клетка — участок со зданием, парком, площадью или парковкой.", Ui.TEXT);
-            return row(y, new Ui.Button(lx(), y, colW(), 20, "Включить кварталы", Ui.Button.Kind.PRIMARY,
-                    () -> { s.arrangement = Arrangement.PLANNER; changed(); rebuild(); }), null);
+        y = text(y, "§fГород из свободных кварталов.§7 Откройте карту местности, нарисуйте кварталы мышью, "
+                + "двигайте и растягивайте их, настраивайте каждый — а потом поправьте положение прямо в мире.", Ui.TEXT);
+        y = row(y, new Ui.Button(lx(), y, colW(), 20, "Открыть редактор города", Ui.Button.Kind.PRIMARY, () -> minecraft.setScreen(new CityEditorScreen(this)))
+                        .icon(new ItemStack(Items.FILLED_MAP)).help("Карта местности сверху: рисуйте, двигайте и настраивайте кварталы."),
+                new Ui.Button(rx(), y, colW(), 20, "Править в мире", Ui.Button.Kind.NORMAL, () -> {
+                    if (s.quarters.isEmpty()) return;
+                    s.arrangement = Arrangement.CITY;
+                    if (ClientState.selected < 0) ClientState.selected = 0;
+                    ClientState.worldEdit = true; ClientState.previewActive = true; ClientState.recompute(); onClose();
+                }).help("Закрыть окно и двигать кварталы стрелками прямо в мире (Enter — вернуться)."));
+        boolean cityMode = s.arrangement == Arrangement.CITY;
+        if (!cityMode && !s.quarters.isEmpty())
+            y = row(y, new Ui.Button(lx(), y, colW(), 20, "Включить режим «Город»", Ui.Button.Kind.NORMAL,
+                    () -> { s.arrangement = Arrangement.CITY; changed(); rebuild(); }).help("Сейчас выбрана схема «" + s.arrangement.label() + "»."), null);
+        y = heading(y, "Кварталы (" + s.quarters.size() + "/" + GenSettings.MAX_QUARTERS + ")");
+        if (s.quarters.isEmpty()) return text(y, "§7Пока пусто — откройте редактор города и нарисуйте первый квартал.", Ui.SUB);
+        int tw = colW();
+        for (int i = 0; i < s.quarters.size(); i++) {
+            GenSettings.Quarter q = s.quarters.get(i);
+            final int qi = i;
+            int x = i % 2 == 0 ? lx() : rx();
+            add(new Ui.Tile(x, y, tw, 24, q.name, q.kind.label() + " • " + q.w() + "×" + q.d() + " м", q.kind.color, () -> false, () -> {
+                ClientState.selected = qi; minecraft.setScreen(new CityEditorScreen(this));
+            }).help("Открыть квартал в редакторе города."));
+            if (i % 2 == 1 || i == s.quarters.size() - 1) y += 27;
         }
-        // кисти
-        CellType[] types = CellType.values();
-        int perRow = cw >= 420 ? 7 : 5, chipW = (cw - (perRow - 1) * 3) / perRow;
-        for (int i = 0; i < types.length; i++) {
-            CellType t = types[i];
-            add(new Ui.Chip(cx0 + (i % perRow) * (chipW + 3), y + (i / perRow) * 18, chipW, 16, t, () -> brush == t, () -> { brush = t; }));
-        }
-        y += ((types.length + perRow - 1) / perRow) * 18 + 4;
-        int bw = 70;
-        int mid = cx0 + cw / 2;
-        add(new Ui.Button(mid - bw - 2, y, bw, 14, "+ сверху", Ui.Button.Kind.NORMAL, () -> grid(1, true, 0, false)).help("Добавить дальний ряд участков."));
-        add(new Ui.Button(mid + 2, y, bw, 14, "− сверху", Ui.Button.Kind.NORMAL, () -> grid(-1, true, 0, false)).help("Убрать дальний ряд."));
-        y += 17;
-        int gh = Math.max(s.rows * 16 + 14, Math.min(s.rows * 28 + 14, ch - 120));
-        add(new Ui.Button(cx0, y + gh / 2 - 15, 18, 14, "+", Ui.Button.Kind.NORMAL, () -> grid(0, false, 1, true)).help("Добавить столбец слева."));
-        add(new Ui.Button(cx0, y + gh / 2 + 1, 18, 14, "−", Ui.Button.Kind.NORMAL, () -> grid(0, false, -1, true)).help("Убрать левый столбец."));
-        add(new Ui.Button(cx0 + cw - 18, y + gh / 2 - 15, 18, 14, "+", Ui.Button.Kind.NORMAL, () -> grid(0, false, 1, false)).help("Добавить столбец справа."));
-        add(new Ui.Button(cx0 + cw - 18, y + gh / 2 + 1, 18, 14, "−", Ui.Button.Kind.NORMAL, () -> grid(0, false, -1, false)).help("Убрать правый столбец."));
-        add(new Ui.Planner(cx0 + 22, y, cw - 44, gh, s, () -> brush, this::changed));
-        y += gh + 3;
-        add(new Ui.Button(mid - bw - 2, y, bw, 14, "+ снизу", Ui.Button.Kind.NORMAL, () -> grid(1, false, 0, false)).help("Добавить ближний ряд."));
-        add(new Ui.Button(mid + 2, y, bw, 14, "− снизу", Ui.Button.Kind.NORMAL, () -> grid(-1, false, 0, false)).help("Убрать ближний ряд."));
-        y += 20;
-        y = row(y, sld(lx(), y, "Ширина участка", 8, 72, s.width, v -> v + " м", v -> s.width = v, "Ширина одной клетки таблицы."),
-                sld(rx(), y, "Глубина участка", 8, 72, s.depth, v -> v + " м", v -> s.depth = v, "Глубина одной клетки таблицы."));
-        y = row(y, cyc(lx(), y, "Улицы между рядами", StreetMode.values(), s.street, v -> s.street = v),
-                cyc(rx(), y, "Между столбцами", StreetMode.values(), s.crossStreets, v -> s.crossStreets = v));
-        int parks = 0, empty = 0;
-        for (int r = 0; r < s.rows; r++) for (int c = 0; c < s.cols; c++) {
-            CellType t = s.cell(r, c);
-            if (t == CellType.PARK || t == CellType.PLAZA || t == CellType.PARKING) parks++;
-            if (t == CellType.EMPTY) empty++;
-        }
-        return text(y, "§7Сетка " + s.rows + "×" + s.cols + " • зданий ≈ " + s.plannedBuildings() + " • парков/площадей: " + parks
-                + (empty > 0 ? " • пустых: " + empty : "") + ". Клетки «Авто» используют тип с вкладки «Здания».", Ui.SUB);
-    }
-
-    private void grid(int dr, boolean top, int dc, boolean left) {
-        s().resizeGrid(dr, top, dc, left);
-        changed();
-        rebuild();
+        y = heading(y + 2, "Весь город");
+        return row(y, sld(lx(), y, "Строящиеся здания", 0, 100, s.construction, v -> v + "%", v -> s.construction = v,
+                        "Доля зданий, которые ещё строятся: каркас, леса, краны. По умолчанию 3% — как в жизни."),
+                cyc(rx(), y, "Озеленение", Greenery.values(), s.greenery, v -> s.greenery = v));
     }
 
     private int tabMap(int y) {
@@ -338,26 +328,44 @@ public class EditorScreen extends Screen {
 
     private int tabSettings(int y) {
         ClientPrefs p = prefs();
+        GenSettings gs = s();
         y = heading(y, "Интерфейс");
-        List<Integer> acc = List.of(0, 1, 2, 3, 4, 5);
+        List<Integer> acc = new ArrayList<>();
+        for (int i = 0; i < Ui.ACCENTS.length; i++) acc.add(i);
         y = row(y, new Ui.Cycle<>(lx(), y, colW(), 20, "Цвет акцента", acc, p.accent, i -> Ui.ACCENT_NAMES[i],
-                        i -> "Цвет кнопок и выделений редактора.", v -> { p.accent = v; ClientPrefs.save(); }),
+                        i -> "Цвет кнопок и выделений редактора.", v -> { p.accent = v; ClientPrefs.save(); rebuild(); }),
                 new Ui.Slider(rx(), y, colW(), 20, "Непрозрачность", 50, 100, p.opacity, v -> v + "%",
                         v -> { p.opacity = v; ClientPrefs.save(); }).help("Насколько панель закрывает мир позади."));
-        y = row(y, new Ui.Toggle(lx(), y, colW(), 20, "Превью при открытии", p.previewOnOpen, v -> { p.previewOnOpen = v; ClientPrefs.save(); })
-                        .help("Сразу показывать рамки зданий, когда открываете редактор."),
+        y = row(y, new Ui.Toggle(lx(), y, colW(), 20, "Современный шрифт", p.modernFont, v -> { p.modernFont = v; ClientPrefs.save(); rebuild(); })
+                        .help("Гладкий шрифт Noto Sans в окнах CityGen. Выключите, чтобы вернуть пиксельный шрифт Minecraft."),
                 new Ui.Toggle(rx(), y, colW(), 20, "Строка подсказок", p.hints, v -> { p.hints = v; ClientPrefs.save(); })
                         .help("Показывать пояснение к элементу под курсором внизу окна."));
-        y = row(y, new Ui.Button(lx(), y, colW(), 20, "Окно по центру", Ui.Button.Kind.NORMAL,
-                        () -> { p.panelDX = 0; p.panelDY = 0; ClientPrefs.save(); rebuild(); }).help("Окно можно перетаскивать за заголовок."),
+        y = row(y, new Ui.Toggle(lx(), y, colW(), 20, "Превью при открытии", p.previewOnOpen, v -> { p.previewOnOpen = v; ClientPrefs.save(); })
+                        .help("Сразу показывать рамки зданий, когда открываете редактор."),
+                new Ui.Button(rx(), y, colW(), 20, "Окно по центру", Ui.Button.Kind.NORMAL,
+                        () -> { p.panelDX = 0; p.panelDY = 0; ClientPrefs.save(); rebuild(); }).help("Окно можно перетаскивать за заголовок."));
+        y = heading(y, "Генерация");
+        y = row(y, sld(lx(), y, "Строящиеся здания", 0, 100, gs.construction, v -> v + "%", v -> gs.construction = v,
+                        "Шанс, что здание ещё строится: каркас, леса, строительная сетка, кран. В жизни это редкость — по умолчанию 3%."),
                 new Ui.Button(rx(), y, colW(), 20, "Сбросить генератор", Ui.Button.Kind.DANGER,
                         () -> { ClientState.resetSettings(); rebuild(); }).help("Вернуть все настройки генератора по умолчанию (сид сохраняется)."));
         y = heading(y, "О моде");
-        y = text(y, "§fCityGen " + VERSION + "§7 — генератор реалистичных зданий и кварталов для Minecraft 1.20.1 (Forge).\n"
+        y = text(y, "§fCityGen " + VERSION + "§7 — генератор реалистичных зданий, кварталов и городов для Minecraft 1.20.1 (Forge).\n"
                 + "Клавиша §fG§7 — открыть редактор (меняется в Настройки → Управление). /citygen undo — отмена, /citygen cancel — остановка.", Ui.SUB);
+        y = text(y, "§bt.me/atremt§7 — здесь вы можете увидеть ранние версии и следить за модом.", Ui.TEXT);
         y = text(y, "§dТак вы можете поддержать автора ♥", Ui.TEXT);
-        return row(y, new Ui.Button(lx(), y, colW(), 20, "♥ Поддержать автора", Ui.Button.Kind.PRIMARY, this::openSupport)
-                .help("Откроется предложение обмена в Steam (после подтверждения ссылки)."), null);
+        y = row(y, new Ui.Button(lx(), y, colW(), 20, "✈ Telegram-канал", Ui.Button.Kind.NORMAL, this::openTelegram)
+                        .help("Откроется t.me/atremt (после подтверждения ссылки): ранние версии и новости мода."),
+                new Ui.Button(rx(), y, colW(), 20, "♥ Поддержать автора", Ui.Button.Kind.PRIMARY, this::openSupport)
+                        .help("Откроется предложение обмена в Steam (после подтверждения ссылки)."));
+        return text(y, "§8Шрифт интерфейса — Noto Sans (SIL Open Font License).", Ui.DIM);
+    }
+
+    private void openTelegram() {
+        minecraft.setScreen(new ConfirmLinkScreen(ok -> {
+            if (ok) Util.getPlatform().openUri(TELEGRAM);
+            minecraft.setScreen(new EditorScreen());
+        }, TELEGRAM, true));
     }
 
     private void openSupport() {
@@ -454,19 +462,21 @@ public class EditorScreen extends Screen {
     public void render(GuiGraphics g, int mx, int my, float pt) {
         int acc = Ui.accent();
         // тень и панель
-        g.fill(px + 3, py + 3, px + pw + 3, py + ph + 3, 0x55000000);
-        Ui.rect(g, px, py, pw, ph, Ui.panel());
-        Ui.outline(g, px, py, pw, ph, Ui.alpha(acc, 0.55f));
+        Ui.softShadow(g, px, py, pw, ph, 6);
+        Ui.round(g, px, py, pw, ph, 6, Ui.alpha(acc, 0.5f));
+        Ui.round(g, px + 1, py + 1, pw - 2, ph - 2, 5, Ui.panel());
         // шапка
-        g.fill(px + 1, py + 1, px + pw - 1, py + 24, Ui.HEADER);
-        g.fill(px + 1, py + 24, px + pw - 1, py + 25, Ui.alpha(acc, 0.6f));
-        Ui.rect(g, px + 6, py + 5, 14, 14, acc);
-        g.drawString(font, "C", px + 10, py + 8, 0xFF0B1118, false);
-        g.drawString(font, "CityGen", px + 25, py + 8, Ui.TEXT, false);
-        if (pw > 420) Ui.small(g, font, "генератор зданий и кварталов", px + 25 + font.width("CityGen") + 6, py + 10, Ui.SUB);
+        g.fillGradient(px + 4, py + 1, px + pw - 4, py + 25, Ui.mix(Ui.HEADER, acc, 0.10f), Ui.HEADER);
+        Ui.round(g, px + 1, py + 1, pw - 2, 6, 5, Ui.mix(Ui.HEADER, acc, 0.10f));
+        g.fill(px + 1, py + 25, px + pw - 1, py + 26, Ui.alpha(acc, 0.55f));
+        Ui.round(g, px + 6, py + 5, 16, 16, 4, acc);
+        Ui.center(g, "C", px + 14, py + 9, 0xFF0A1016);
+        Ui.text(g, "CityGen", px + 28, py + 9, Ui.TEXT);
+        if (pw > 440) Ui.small(g, "генератор зданий, кварталов и городов", px + 28 + Ui.width("CityGen") + 6, py + 11, Ui.SUB);
         // боковая панель
-        g.fill(px + 1, py + 25, px + side, py + ph - 1, Ui.SIDEBAR);
-        g.fill(px + side, py + 25, px + side + 1, py + ph - 1, Ui.BORDER);
+        g.fill(px + 1, py + 26, px + side, py + ph - 6, Ui.SIDEBAR);
+        Ui.round(g, px + 1, py + ph - 8, side - 1, 7, 5, Ui.SIDEBAR);
+        g.fill(px + side, py + 26, px + side + 1, py + ph - 1, Ui.BORDER);
         if (side > 40) sidebarStats(g);
         // подвал
         g.fill(px + side + 1, py + ph - 31, px + pw - 1, py + ph - 30, Ui.BORDER);
@@ -475,7 +485,7 @@ public class EditorScreen extends Screen {
         if (prefs().hints) {
             String h = hoveredHelp(mx, my);
             if (!h.isEmpty()) {
-                List<FormattedCharSequence> lines = font.split(Component.literal(h), (int) ((cw - 4) / 0.75f));
+                List<FormattedCharSequence> lines = Ui.wrap(h, (int) ((cw - 4) / 0.75f));
                 int ly = hy + (lines.size() > 1 ? -3 : 2);
                 for (int i = 0; i < Math.min(2, lines.size()); i++) {
                     g.pose().pushPose();
@@ -523,23 +533,23 @@ public class EditorScreen extends Screen {
 
     private void sidebarStats(GuiGraphics g) {
         Layout L = ClientState.layout;
-        int x = px + 7, y = py + 26 + TABS.length * 22 + 8;
+        int x = px + 8, y = py + 30 + TABS.length * 23 + 8;
         if (y + 50 > py + ph) return;
         g.fill(px + 6, y - 4, px + side - 6, y - 3, Ui.BORDER);
         if (L == null || L.plans.isEmpty() && L.lots.isEmpty()) {
-            Ui.small(g, font, "Нет превью", x, y, Ui.DIM);
+            Ui.small(g, "Нет превью", x, y, Ui.DIM);
             return;
         }
         int fmin = Integer.MAX_VALUE, fmax = 0, hmax = 0;
         for (Plan p : L.plans) { fmin = Math.min(fmin, p.floors); fmax = Math.max(fmax, p.floors); hmax = Math.max(hmax, p.estimatedHeight()); }
-        Ui.small(g, font, "Зданий: " + L.plans.size(), x, y, Ui.TEXT);
+        Ui.small(g, "Зданий: " + L.plans.size(), x, y, Ui.TEXT);
         if (!L.plans.isEmpty()) {
-            Ui.small(g, font, "Этажей: " + (fmin == fmax ? fmin : fmin + "–" + fmax), x, y + 9, Ui.SUB);
-            Ui.small(g, font, "Высота до " + hmax + " м", x, y + 18, Ui.SUB);
+            Ui.small(g, "Этажей: " + (fmin == fmax ? fmin : fmin + "–" + fmax), x, y + 9, Ui.SUB);
+            Ui.small(g, "Высота до " + hmax + " м", x, y + 18, Ui.SUB);
         }
-        if (!L.lots.isEmpty()) Ui.small(g, font, "Парков/площадей: " + L.lots.size(), x, y + 27, Ui.SUB);
-        if (L.warnings > 0) Ui.small(g, font, "⚠ понижено: " + L.warnings, x, y + 36, 0xFFFFC857);
-        Ui.small(g, font, "v" + VERSION + " • клавиша G", x, py + ph - 10, Ui.DIM);
+        if (!L.lots.isEmpty()) Ui.small(g, "Парков/площадей: " + L.lots.size(), x, y + 27, Ui.SUB);
+        if (L.warnings > 0) Ui.small(g, "⚠ понижено: " + L.warnings, x, y + 36, 0xFFFFC857);
+        Ui.small(g, "v" + VERSION + " • клавиша G", x, py + ph - 10, Ui.DIM);
     }
 
     private double mapScale() {
@@ -552,7 +562,7 @@ public class EditorScreen extends Screen {
         Ui.outline(g, mapX, mapY, mapW, mapH, Ui.BORDER);
         if (!MapPreview.ready()) {
             String t = MapPreview.busy ? "Рисую карту…" : (ClientState.layout == null ? "Нет превью — нажмите «Сюда»" : "Подготовка…");
-            g.drawCenteredString(font, t, mapX + mapW / 2, mapY + mapH / 2 - 4, Ui.SUB);
+            Ui.center(g, t, mapX + mapW / 2, mapY + mapH / 2 - 4, Ui.SUB);
             return;
         }
         int tw = MapPreview.texW, th = MapPreview.texH;
@@ -565,8 +575,8 @@ public class EditorScreen extends Screen {
         int dw = (int) Math.round(srcW * k), dh = (int) Math.round(srcH * k);
         int dx = mapX + (mapW - dw) / 2, dy = mapY + (mapH - dh) / 2;
         g.blit(MapPreview.TEX, dx, dy, dw, dh, u, v, srcW, srcH, tw, th);
-        if (MapPreview.busy) Ui.small(g, font, "обновление…", mapX + 4, mapY + 4, 0xFFFFC857);
-        Ui.small(g, font, "×" + mapZoom, mapX + mapW - 16, mapY + 4, Ui.SUB);
-        Ui.small(g, font, "↑ направление взгляда", mapX + 4, mapY + mapH - 9, Ui.SUB);
+        if (MapPreview.busy) Ui.small(g, "обновление…", mapX + 4, mapY + 4, 0xFFFFC857);
+        Ui.small(g, "×" + mapZoom, mapX + mapW - 16, mapY + 4, Ui.SUB);
+        Ui.small(g, "↑ направление взгляда", mapX + 4, mapY + mapH - 9, Ui.SUB);
     }
 }

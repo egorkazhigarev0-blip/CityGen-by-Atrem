@@ -65,14 +65,18 @@ public final class WorldTests {
             s.style = k == 0 ? GenSettings.StyleMode.MODERN : k == 1 ? GenSettings.StyleMode.CLASSIC
                     : k == 2 ? GenSettings.StyleMode.ANTIQUE : GenSettings.StyleMode.FANTASY;
             if (k == 2) {
-                s.arrangement = GenSettings.Arrangement.PLANNER; s.rows = 2; s.cols = 3;
-                s.cells = new byte[]{0, 9, 8, 10, 0, 11};
+                s.construction = 30;
             }
             if (k == 3) { s.arrangement = GenSettings.Arrangement.STREET; s.fireEscapes = GenSettings.Toggle3.ON; }
             BlockPos base0 = h.absolutePos(new BlockPos(0, 1, 0)).offset(400 * (k + 1), 0, 0);
             level.getChunk(base0.getX() >> 4, base0.getZ() >> 4);
             BlockPos anchor = new BlockPos(base0.getX(), level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, base0.getX(), base0.getZ()), base0.getZ());
             CityGen.LOG.info("WORLDTEST anchor {} block below {}", anchor, level.getBlockState(anchor.below()).getBlock().getDescriptionId());
+            if (k == 2) { // город: три квартала с общими дорогами
+                DemoCity.make(s, anchor.getX(), anchor.getZ() - 75);
+                s.quarters.subList(3, s.quarters.size()).clear();
+                s.interior = GenSettings.Interior.ROOMS;
+            }
             Layout L = Layout.compute(s, anchor, dirs[k], level);
             Layout air = Layout.compute(s, anchor.above(17), dirs[k], level);
             if (air.streetY != L.streetY) {

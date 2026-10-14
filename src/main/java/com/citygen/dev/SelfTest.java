@@ -87,13 +87,64 @@ public final class SelfTest {
         ImageIO.write(sheet(plansImg, planLabels, 4, 480, 420), "png", new File(out, "floorplans.png"));
 
         // 3) сцены
-        GenSettings planner = new GenSettings();
-        planner.arrangement = Arrangement.PLANNER; planner.type = BuildingType.MIXED; planner.rows = 3; planner.cols = 4;
-        planner.cells = new byte[]{0, 0, 9, 0, 1, 0, 0, 5, 10, 4, 11, 6};
-        planner.width = 26; planner.depth = 22; planner.street = StreetMode.ROAD; planner.crossStreets = StreetMode.ROAD;
-        planner.interior = Interior.NONE; planner.seed = 5;
-        scene(out, "planner_city", planner, PreviewRenderer.Mode.ISO);
-        scene(out, "planner_city_top", planner, PreviewRenderer.Mode.TOP);
+        GenSettings city = new GenSettings();
+        DemoCity.make(city, 0, 0);
+        city.interior = Interior.NONE; city.seed = 5; city.construction = 10; city.greenery = Greenery.RICH;
+        scene(out, "city", city, PreviewRenderer.Mode.ISO);
+        scene(out, "city_top", city, PreviewRenderer.Mode.TOP);
+        // крупно: перекрёсток двух кварталов (дороги, «зебры», фонари у бордюра)
+        GenSettings cross = new GenSettings();
+        DemoCity.make(cross, 0, 0);
+        cross.quarters.subList(2, cross.quarters.size()).clear();
+        cross.interior = Interior.NONE; cross.seed = 6;
+        scene(out, "crossing", cross, PreviewRenderer.Mode.ISO);
+
+        // стройки
+        List<BufferedImage> cons = new ArrayList<>();
+        List<String> consL = new ArrayList<>();
+        for (BuildingType t : new BuildingType[]{BuildingType.SKYSCRAPER, BuildingType.OFFICE, BuildingType.HIGHRISE, BuildingType.MIDRISE, BuildingType.HOUSE, BuildingType.TOWNHOUSE}) {
+            GenSettings s2 = base(t);
+            s2.construction = 100; s2.seed = 300 + t.ordinal();
+            if (t == BuildingType.SKYSCRAPER) { s2.floorsMin = 26; s2.floorsMax = 26; }
+            Layout L = Layout.compute(s2, O, Direction.NORTH, null);
+            cons.add(img(PreviewRenderer.render(L, s2, PreviewRenderer.Mode.ISO, () -> false)));
+            consL.add("Стройка: " + t.label);
+        }
+        ImageIO.write(sheet(cons, consL, 3, 520, 560), "png", new File(out, "construction.png"));
+
+        // проходимость: «виртуальный игрок» заходит в каждое здание
+        Random rr = new Random(42);
+        int checked = 0, bad = 0;
+        double sum = 0;
+        StringBuilder report = new StringBuilder();
+        for (int k = 0; k < 480; k++) {
+            BuildingType t = BuildingType.values()[rr.nextInt(BuildingType.values().length - 1)];
+            GenSettings s3 = base(t);
+            s3.style = StyleMode.values()[1 + rr.nextInt(4)];
+            s3.interior = Interior.FURNISHED; s3.seed = rr.nextLong(); s3.construction = 0;
+            if (t == BuildingType.SKYSCRAPER) { s3.floorsMin = 12; s3.floorsMax = 20; }
+            try {
+                Layout L = Layout.compute(s3, O, Direction.NORTH, null);
+                Plan p = L.plans.get(0);
+                Blueprint bp = BuildingGenerator.generate(p, s3);
+                Reach.Result rs = Reach.check(bp, p);
+                checked++;
+                sum += rs.worst;
+                if (rs.worst < 0.85) {
+                    if (bad < 6) {
+                        int fy1 = 0;
+                        for (int i = 0; i < Math.min(rs.worstFloor, p.floors - 1); i++) fy1 += i == 0 ? p.groundH : p.floorH;
+                        java.nio.file.Files.writeString(new File(out, "reach_" + bad + ".txt").toPath(),
+                                t + " " + p.style + " " + p.facade + " " + p.shape + " gh=" + p.groundH + " fh=" + p.floorH + "\n"
+                                        + Reach.dump(bp, rs, Math.max(0, fy1 - p.groundH - 1), fy1 + 2));
+                    }
+                    bad++;
+                    report.append(String.format("%n  %s %s %s %s floors=%d worst=%.2f@%d seed=%d", t, p.style, p.facade, p.shape, p.floors,
+                            rs.worst, rs.worstFloor, s3.seed));
+                }
+            } catch (Throwable ex) { errors++; CityGen.LOG.error("SELFTEST reach failed", ex); }
+        }
+        CityGen.LOG.info("SELFTEST REACH: checked={} bad={} avgWorst={}{}", checked, bad, String.format("%.3f", sum / Math.max(1, checked)), report);
 
         GenSettings fant = base(BuildingType.SKYSCRAPER);
         fant.style = StyleMode.FANTASY; fant.count = 5; fant.heightProfile = HeightProfile.PEAK; fant.floorsMin = 18; fant.floorsMax = 40;
@@ -131,13 +182,30 @@ public final class SelfTest {
             s.fireEscapes = Toggle3.values()[r.nextInt(3)];
             s.interior = Interior.values()[r.nextInt(4)];
             s.stairs = StairsMode.values()[r.nextInt(3)];
-            s.arrangement = Arrangement.values()[r.nextInt(3)];
+            s.arrangement = Arrangement.values()[r.nextInt(Arrangement.values().length)];
             s.street = StreetMode.values()[r.nextInt(3)];
             s.crossStreets = StreetMode.values()[r.nextInt(3)];
             s.greenery = Greenery.values()[r.nextInt(3)];
-            s.rows = 1 + r.nextInt(3); s.cols = 1 + r.nextInt(4);
-            s.cells = new byte[s.rows * s.cols];
-            for (int i = 0; i < s.cells.length; i++) s.cells[i] = (byte) r.nextInt(CellType.values().length);
+            s.construction = r.nextInt(30);
+            s.quarters.clear();
+            for (int qn = 1 + r.nextInt(3), qi = 0; qi < qn; qi++) {
+                GenSettings.Quarter q = new GenSettings.Quarter();
+                q.kind = GenSettings.QuarterKind.values()[r.nextInt(GenSettings.QuarterKind.values().length)];
+                q.facing = GenSettings.QFacing.values()[r.nextInt(GenSettings.QFacing.values().length)];
+                q.courtyard = GenSettings.Courtyard.values()[r.nextInt(4)];
+                q.street = StreetMode.values()[r.nextInt(3)];
+                q.x0 = r.nextInt(200) - 100; q.z0 = r.nextInt(200) - 100;
+                q.x1 = q.x0 + 14 + r.nextInt(80); q.z1 = q.z0 + 14 + r.nextInt(80);
+                q.floorsMin = r.nextBoolean() ? 0 : 1 + r.nextInt(10); q.floorsMax = q.floorsMin + r.nextInt(10);
+                q.lotWidth = r.nextBoolean() ? 0 : 6 + r.nextInt(40); q.spacing = r.nextInt(8) - 1; q.seed = r.nextInt(99);
+                q.heights = HeightProfile.values()[r.nextInt(4)];
+                q.ground = GroundFloor.values()[r.nextInt(GroundFloor.values().length)];
+                q.construction = r.nextInt(5) == 0 ? r.nextInt(101) : -1;
+                q.raise = r.nextInt(9) - 4;
+                q.lotDepth = r.nextBoolean() ? 0 : 7 + r.nextInt(30);
+                q.style = StyleMode.values()[r.nextInt(StyleMode.values().length)];
+                s.quarters.add(q);
+            }
             s.spacing = r.nextInt(10);
             s.rotation = r.nextInt(4); s.offset = r.nextInt(40) - 20;
             s.palette = r.nextInt(Palettes.ALL.size() + 1) - 1;
@@ -158,7 +226,7 @@ public final class SelfTest {
     private static GenSettings base(BuildingType t) {
         GenSettings s = new GenSettings();
         s.type = t; s.applyTypeDefaults(); s.count = 1; s.street = StreetMode.NONE; s.greenery = Greenery.LIGHT;
-        s.interior = Interior.NONE;
+        s.interior = Interior.NONE; s.construction = 0;
         return s;
     }
 

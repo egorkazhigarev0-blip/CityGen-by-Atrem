@@ -21,6 +21,9 @@ public final class ClientPrefs {
     public boolean mapIso = false;
     public boolean previewOnOpen = true;
     public boolean hints = true;
+    public boolean modernFont = true;
+    public int satRadius = 160;
+    public boolean mapGrid = true, mapPlan = true;
 
     public static ClientPrefs get() {
         if (INSTANCE == null) INSTANCE = load();

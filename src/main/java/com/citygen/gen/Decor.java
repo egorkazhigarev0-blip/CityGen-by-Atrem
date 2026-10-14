@@ -65,6 +65,33 @@ public final class Decor {
         }
     }
 
+    /** Компактное уличное дерево у бордюра: крона 3×3, почти не нависает над дорогой. */
+    public static void streetTree(OpList ops, int x, int y, int z, StyleMode style, Random r) {
+        if (style == StyleMode.ANTIQUE) { tree(ops, x, y, z, style, r); return; }
+        Block log, leaf;
+        if (style == StyleMode.FANTASY) {
+            boolean warped = r.nextBoolean();
+            log = warped ? Blocks.WARPED_STEM : Blocks.CRIMSON_STEM;
+            leaf = warped ? Blocks.WARPED_WART_BLOCK : Blocks.NETHER_WART_BLOCK;
+        } else {
+            int kind = r.nextInt(4);
+            log = kind == 0 ? Blocks.BIRCH_LOG : kind == 1 ? Blocks.CHERRY_LOG : Blocks.OAK_LOG;
+            leaf = kind == 0 ? Blocks.BIRCH_LEAVES : kind == 1 ? Blocks.CHERRY_LEAVES : Blocks.OAK_LEAVES;
+        }
+        int t = 3 + r.nextInt(2);
+        for (int k = 1; k <= t; k++) ops.add(new BlockPos(x, y + k, z), st(log), OpList.SET);
+        for (int dy = 0; dy <= 2; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+                for (int dz = -1; dz <= 1; dz++) {
+                    boolean corner = dx != 0 && dz != 0;
+                    if (dy == 2 && corner) continue;
+                    if (dy == 0 && corner && r.nextBoolean()) continue;
+                    if (dx == 0 && dz == 0 && dy == 0) continue;
+                    ops.add(new BlockPos(x + dx, y + t + dy, z + dz), leaves(leaf), OpList.SET);
+                }
+        if (style == StyleMode.FANTASY) ops.add(new BlockPos(x, y + t + 3, z), st(Blocks.SHROOMLIGHT), OpList.SET);
+    }
+
     /** Фонарный столб: колонна + фонарь сверху. */
     public static void lamp(OpList ops, int x, int y, int z, StyleMode style) {
         Block post = switch (style) {

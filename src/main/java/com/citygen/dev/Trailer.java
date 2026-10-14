@@ -277,13 +277,9 @@ public final class Trailer {
     // =====================================================================
     private static GenSettings citySettings() {
         GenSettings s = new GenSettings();
-        s.arrangement = Arrangement.PLANNER;
         s.type = BuildingType.MIXED;
-        s.rows = 3; s.cols = 4;
-        // 0 авто, 1 небоскрёб, 4 ср.плотн, 5 таунхаусы, 8 общ., 9 парк, 10 площадь, 11 парковка
-        s.cells = new byte[]{1, 0, 9, 1, 0, 8, 0, 0, 4, 10, 5, 4};
-        s.width = 28; s.depth = 24;
-        s.street = StreetMode.ROAD; s.crossStreets = StreetMode.ROAD;
+        if (site != null) DemoCity.make(s, site.getX(), site.getZ() - 70);
+        s.street = StreetMode.ROAD;
         s.variation = Variation.DIFFERENT; s.heightProfile = HeightProfile.PEAK;
         s.interior = Interior.FURNISHED; s.greenery = Greenery.RICH; s.litPercent = 60;
         s.distance = 4; s.seed = 777; s.newSeedEachBuild = false;

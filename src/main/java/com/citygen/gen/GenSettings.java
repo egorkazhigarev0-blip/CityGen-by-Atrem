@@ -3,7 +3,6 @@ package com.citygen.gen;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.util.Mth;
 
-import java.util.Arrays;
 
 /** Все настройки генератора. Передаются на сервер пакетом и сохраняются в config/citygen-editor.json. */
 public class GenSettings {
@@ -150,9 +149,122 @@ public class GenSettings {
     public enum Arrangement implements Labeled {
         ROW("Ряд", "Здания стоят в линию перед вами, фасадами к вам."),
         STREET("Улица", "Улица уходит вперёд, здания по обе стороны смотрят на неё."),
-        PLANNER("Кварталы", "Сетка участков из вкладки «Кварталы»: строки, столбцы, парки, площади.");
+        CITY("Город", "Свободные кварталы из редактора города: ставьте их на карте местности и двигайте прямо в мире.");
         final String l, h; Arrangement(String l, String h) { this.l = l; this.h = h; }
         public String label() { return l; } public String help() { return h; }
+    }
+
+    /** Тип квартала в редакторе города. */
+    public enum QuarterKind implements Labeled {
+        MIXED("Смешанный", 0xFF6FA8FF, "Многоэтажки, дома средней плотности, офисы и магазины вперемешку."),
+        DOWNTOWN("Деловой центр", 0xFF4F8DFF, "Небоскрёбы и офисные башни, площади между ними."),
+        RESIDENTIAL("Жилой район", 0xFF8C6CF0, "Многоэтажки и дома средней плотности, зелёные дворы."),
+        HISTORIC("Исторический центр", 0xFFE0A33C, "Сплошная застройка по периметру, мансарды, кафе на первых этажах."),
+        TOWNHOUSES("Таунхаусы", 0xFFE0703C, "Ряды узких домов вплотную, ступенчатые фронтоны."),
+        SUBURB("Пригород", 0xFFD9C36A, "Частные дома с палисадниками и садами."),
+        COMMERCIAL("Торговый", 0xFFE05A7A, "Торговые центры с парковками."),
+        CULTURE("Культурный", 0xFFB9A6E0, "Музеи, библиотеки и театры вокруг площади."),
+        PARK("Парк", 0xFF4CAF50, "Весь квартал — сквер: газоны, дорожки, фонтан, скамейки."),
+        PLAZA("Площадь", 0xFFB0B7BF, "Мощёная площадь с фонтаном или памятником."),
+        PARKING("Парковка", 0xFF55606B, "Асфальтовая парковка с разметкой и машинами."),
+        CONSTRUCTION("Стройка", 0xFFFFC23D, "Все здания квартала строятся: краны, леса, строительная сетка."),
+        CUSTOM("Свои настройки", 0xFF9AA7B5, "Тип, стиль, этажность и размеры — из вкладки «Здания».");
+        final String l, h; public final int color;
+        QuarterKind(String l, int color, String h) { this.l = l; this.color = color; this.h = h; }
+        public String label() { return l; } public String help() { return h; }
+        public boolean open() { return this == PARK || this == PLAZA || this == PARKING; }
+    }
+
+    public enum QFacing implements Labeled {
+        AUTO("Авто", "По типу квартала."),
+        NORTH_SOUTH("Север + юг", "Два ряда домов спиной друг к другу: фасады на северную и южную улицы."),
+        WEST_EAST("Запад + восток", "Два ряда домов: фасады на западную и восточную улицы."),
+        PERIMETER("По периметру", "Дома по всем четырём сторонам, внутри — двор (европейский квартал)."),
+        NORTH("Север", "Один ряд, фасады на северную улицу."),
+        SOUTH("Юг", "Один ряд, фасады на южную улицу."),
+        WEST("Запад", "Один ряд, фасады на западную улицу."),
+        EAST("Восток", "Один ряд, фасады на восточную улицу.");
+        final String l, h; QFacing(String l, String h) { this.l = l; this.h = h; }
+        public String label() { return l; } public String help() { return h; }
+    }
+
+    public enum Courtyard implements Labeled {
+        AUTO("Авто", "По типу квартала."),
+        NONE("Пусто", "Внутри квартала ничего не строится."),
+        GARDEN("Сад", "Зелёный двор с деревьями, дорожками и скамейками."),
+        PARKING("Парковка", "Двор отдан под парковку.");
+        final String l, h; Courtyard(String l, String h) { this.l = l; this.h = h; }
+        public String label() { return l; } public String help() { return h; }
+    }
+
+    /** Квартал города: прямоугольник в мировых координатах и его настройки. */
+    public static class Quarter {
+        public String name = "Квартал";
+        public int x0, z0, x1, z1;
+        public QuarterKind kind = QuarterKind.MIXED;
+        public StyleMode style = StyleMode.AUTO;
+        public int floorsMin = 0, floorsMax = 0;   // 0 — по типу квартала
+        public int lotWidth = 0, lotDepth = 0;     // 0 — авто
+        public int spacing = -1;                   // -1 — авто
+        public QFacing facing = QFacing.AUTO;
+        public StreetMode street = StreetMode.ROAD;
+        public Courtyard courtyard = Courtyard.AUTO;
+        public HeightProfile heights = HeightProfile.RANDOM;
+        public GroundFloor ground = GroundFloor.AUTO;
+        public int construction = -1;              // -1 — как в общих настройках
+        public int raise = 0;                      // сдвиг основания относительно рельефа
+        public int seed = 1;
+
+        public int w() { return x1 - x0 + 1; }
+        public int d() { return z1 - z0 + 1; }
+
+        public Quarter copyQ() {
+            Quarter q = new Quarter();
+            q.name = name; q.x0 = x0; q.z0 = z0; q.x1 = x1; q.z1 = z1; q.kind = kind; q.style = style;
+            q.floorsMin = floorsMin; q.floorsMax = floorsMax; q.lotWidth = lotWidth; q.lotDepth = lotDepth; q.spacing = spacing;
+            q.facing = facing; q.street = street; q.courtyard = courtyard; q.seed = seed;
+            q.heights = heights; q.ground = ground; q.construction = construction; q.raise = raise;
+            return q;
+        }
+
+        void sanitize() {
+            if (name == null || name.isBlank()) name = "Квартал";
+            if (name.length() > 24) name = name.substring(0, 24);
+            int ax = Math.min(x0, x1), bx = Math.max(x0, x1), az = Math.min(z0, z1), bz = Math.max(z0, z1);
+            x0 = ax; x1 = Math.max(ax + MIN_Q - 1, Math.min(bx, ax + MAX_Q - 1));
+            z0 = az; z1 = Math.max(az + MIN_Q - 1, Math.min(bz, az + MAX_Q - 1));
+            kind = nz(kind, QuarterKind.MIXED); style = nz(style, StyleMode.AUTO);
+            floorsMin = Mth.clamp(floorsMin, 0, 80); floorsMax = Mth.clamp(floorsMax, 0, 80);
+            lotWidth = lotWidth == 0 ? 0 : Mth.clamp(lotWidth, 6, 64); lotDepth = lotDepth == 0 ? 0 : Mth.clamp(lotDepth, 7, 64);
+            spacing = Mth.clamp(spacing, -1, 16);
+            facing = nz(facing, QFacing.AUTO); street = nz(street, StreetMode.ROAD); courtyard = nz(courtyard, Courtyard.AUTO);
+            heights = nz(heights, HeightProfile.RANDOM); ground = nz(ground, GroundFloor.AUTO);
+            construction = Mth.clamp(construction, -1, 100); raise = Mth.clamp(raise, -16, 16);
+        }
+
+        public boolean contains(int x, int z) { return x >= x0 && x <= x1 && z >= z0 && z <= z1; }
+
+        public void moveBy(int dx, int dz) { x0 += dx; x1 += dx; z0 += dz; z1 += dz; }
+
+        void write(FriendlyByteBuf b) {
+            b.writeUtf(name, 64); b.writeInt(x0); b.writeInt(z0); b.writeInt(x1); b.writeInt(z1);
+            b.writeEnum(kind); b.writeEnum(style); b.writeVarInt(floorsMin); b.writeVarInt(floorsMax);
+            b.writeVarInt(lotWidth); b.writeVarInt(lotDepth); b.writeVarInt(spacing + 1); b.writeEnum(facing);
+            b.writeEnum(street); b.writeEnum(courtyard); b.writeVarInt(seed);
+            b.writeEnum(heights); b.writeEnum(ground); b.writeVarInt(construction + 1); b.writeVarInt(raise + 16);
+        }
+
+        static Quarter read(FriendlyByteBuf b) {
+            Quarter q = new Quarter();
+            q.name = b.readUtf(64); q.x0 = b.readInt(); q.z0 = b.readInt(); q.x1 = b.readInt(); q.z1 = b.readInt();
+            q.kind = b.readEnum(QuarterKind.class); q.style = b.readEnum(StyleMode.class);
+            q.floorsMin = b.readVarInt(); q.floorsMax = b.readVarInt(); q.lotWidth = b.readVarInt(); q.lotDepth = b.readVarInt();
+            q.spacing = b.readVarInt() - 1; q.facing = b.readEnum(QFacing.class); q.street = b.readEnum(StreetMode.class);
+            q.courtyard = b.readEnum(Courtyard.class); q.seed = b.readVarInt();
+            q.heights = b.readEnum(HeightProfile.class); q.ground = b.readEnum(GroundFloor.class);
+            q.construction = b.readVarInt() - 1; q.raise = b.readVarInt() - 16;
+            return q;
+        }
     }
 
     public enum GroundMode implements Labeled {
@@ -200,7 +312,7 @@ public class GenSettings {
         }
     }
 
-    public static final int MAX_ROWS = 6, MAX_COLS = 8;
+    public static final int MAX_QUARTERS = 24, MIN_Q = 14, MAX_Q = 200;
 
     // ---------------- здания ----------------
     public int count = 3;
@@ -247,9 +359,11 @@ public class GenSettings {
     public long seed = 20261013L;
     public boolean newSeedEachBuild = true;
 
-    // ---------------- кварталы ----------------
-    public int rows = 2, cols = 3;
-    public byte[] cells = new byte[]{0, 9, 0, 0, 10, 0};
+    public int construction = 3; // % строящихся зданий
+
+    // ---------------- город ----------------
+    public java.util.List<Quarter> quarters = new java.util.ArrayList<>();
+    public int buildOnly = -1; // индекс квартала для постройки только его (-1 — все)
 
     public void applyTypeDefaults() {
         if (type == BuildingType.MIXED) return;
@@ -261,38 +375,10 @@ public class GenSettings {
         else if (spacing < 2) spacing = 4;
     }
 
-    public CellType cell(int r, int c) {
-        int i = r * cols + c;
-        if (cells == null || i < 0 || i >= cells.length) return CellType.AUTO;
-        return CellType.values()[Mth.clamp(cells[i], 0, CellType.values().length - 1)];
-    }
-
-    public void setCell(int r, int c, CellType t) {
-        if (r < 0 || c < 0 || r >= rows || c >= cols) return;
-        cells[r * cols + c] = (byte) t.ordinal();
-    }
-
-    /** Изменение таблицы кварталов: dr/dc = +1/-1, top/left — с какой стороны. */
-    public void resizeGrid(int dr, boolean top, int dc, boolean left) {
-        int nr = Mth.clamp(rows + dr, 1, MAX_ROWS), nc = Mth.clamp(cols + dc, 1, MAX_COLS);
-        if (nr == rows && nc == cols) return;
-        int rOff = (top && nr != rows) ? nr - rows : 0;
-        int cOff = (left && nc != cols) ? nc - cols : 0;
-        byte[] n = new byte[nr * nc];
-        for (int r = 0; r < nr; r++)
-            for (int c = 0; c < nc; c++) {
-                int or = r - rOff, oc = c - cOff;
-                n[r * nc + c] = (or >= 0 && oc >= 0 && or < rows && oc < cols) ? (byte) cell(or, oc).ordinal() : 0;
-            }
-        rows = nr; cols = nc; cells = n;
-    }
-
+    /** Сколько зданий примерно получится в городе (для подсказок). */
     public int plannedBuildings() {
         int k = 0;
-        for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
-            CellType t = cell(r, c);
-            if (t == CellType.AUTO || t.building() != null) k += t == CellType.TOWNHOUSE ? Math.max(1, width / 7) : 1;
-        }
+        for (Quarter q : quarters) if (!q.kind.open()) k += Math.max(1, (q.w() / 18 + 1) * (q.d() > 40 ? 2 : 1));
         return k;
     }
 
@@ -304,7 +390,7 @@ public class GenSettings {
         return c;
     }
 
-    private static <E extends Enum<E>> E nz(E v, E def) { return v == null ? def : v; }
+    static <E extends Enum<E>> E nz(E v, E def) { return v == null ? def : v; }
 
     public GenSettings sanitize() {
         count = Mth.clamp(count, 1, 16);
@@ -326,9 +412,12 @@ public class GenSettings {
         rotation = Math.floorMod(rotation, 4); spacing = Mth.clamp(spacing, 0, 24);
         ground = nz(ground, GroundMode.PLAYER); street = nz(street, StreetMode.SIDEWALK);
         crossStreets = nz(crossStreets, StreetMode.SIDEWALK); greenery = nz(greenery, Greenery.LIGHT);
-        rows = Mth.clamp(rows, 1, MAX_ROWS); cols = Mth.clamp(cols, 1, MAX_COLS);
-        if (cells == null || cells.length != rows * cols) cells = Arrays.copyOf(cells == null ? new byte[0] : cells, rows * cols);
-        for (int i = 0; i < cells.length; i++) cells[i] = (byte) Mth.clamp(cells[i], 0, CellType.values().length - 1);
+        construction = Mth.clamp(construction, 0, 100);
+        if (quarters == null) quarters = new java.util.ArrayList<>();
+        quarters.removeIf(java.util.Objects::isNull);
+        while (quarters.size() > MAX_QUARTERS) quarters.remove(quarters.size() - 1);
+        for (Quarter q : quarters) q.sanitize();
+        buildOnly = Mth.clamp(buildOnly, -1, quarters.size() - 1);
         return this;
     }
 
@@ -342,7 +431,8 @@ public class GenSettings {
         b.writeEnum(arrangement); b.writeVarInt(distance); b.writeVarInt(offset + 64); b.writeVarInt(rotation);
         b.writeVarInt(spacing); b.writeEnum(ground); b.writeEnum(street); b.writeEnum(crossStreets); b.writeEnum(greenery);
         b.writeBoolean(yards); b.writeBoolean(clearSite); b.writeBoolean(foundation); b.writeLong(seed); b.writeBoolean(newSeedEachBuild);
-        b.writeVarInt(rows); b.writeVarInt(cols); b.writeByteArray(cells);
+        b.writeVarInt(construction); b.writeVarInt(buildOnly + 1);
+        b.writeVarInt(quarters.size()); for (Quarter q : quarters) q.write(b);
     }
 
     public static GenSettings read(FriendlyByteBuf b) {
@@ -362,7 +452,10 @@ public class GenSettings {
         s.street = b.readEnum(StreetMode.class); s.crossStreets = b.readEnum(StreetMode.class); s.greenery = b.readEnum(Greenery.class);
         s.yards = b.readBoolean(); s.clearSite = b.readBoolean(); s.foundation = b.readBoolean(); s.seed = b.readLong();
         s.newSeedEachBuild = b.readBoolean();
-        s.rows = b.readVarInt(); s.cols = b.readVarInt(); s.cells = b.readByteArray(256);
+        s.construction = b.readVarInt(); s.buildOnly = b.readVarInt() - 1;
+        int nq = Math.min(MAX_QUARTERS, b.readVarInt());
+        s.quarters = new java.util.ArrayList<>();
+        for (int i = 0; i < nq; i++) s.quarters.add(Quarter.read(b));
         return s.sanitize();
     }
 }
