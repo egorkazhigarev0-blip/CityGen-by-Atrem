@@ -80,6 +80,7 @@ public class CityEditorScreen extends Screen {
     // =====================================================================
     @Override
     protected void init() {
+        open = this;
         clearWidgets();
         side.clear();
         nameBox = null;
@@ -149,6 +150,16 @@ public class CityEditorScreen extends Screen {
     }
 
     private void rebuild() { init(); }
+
+    // ---------------- для записи роликов (dev/Trailer) ----------------
+    /** Открытый сейчас редактор города (или null). */
+    public static CityEditorScreen open;
+    /** Нарисованный «курсор» в координатах интерфейса (только для роликов). */
+    public static double[] devCursor;
+
+    public double[] toScreen(double wx, double wz) { return new double[]{sx(wx), sy(wz)}; }
+
+    public void devRefresh() { rebuild(); }
 
     private void retake() {
         Player pl = minecraft.player;
@@ -752,6 +763,7 @@ public class CityEditorScreen extends Screen {
 
     @Override
     public void removed() {
+        if (open == this) open = null;
         ClientState.save();
     }
 
@@ -803,6 +815,14 @@ public class CityEditorScreen extends Screen {
             g.fill(sideX + sideW - 3, by, sideX + sideW - 1, by + bh, Ui.alpha(acc, 0.8f));
         }
         renderTooltip(g, mx, my);
+        if (devCursor != null) {
+            int cx = (int) devCursor[0], cy = (int) devCursor[1];
+            g.pose().pushPose();
+            g.pose().translate(0, 0, 500);
+            for (int i = 0; i < 11; i++) g.fill(cx - 1, cy + i - 1, cx + Math.max(1, i * 6 / 10) + 2, cy + i + 1, 0xFF000000);
+            for (int i = 0; i < 10; i++) g.fill(cx, cy + i, cx + Math.max(1, i * 6 / 10) + 1, cy + i + 1, 0xFFFFFFFF);
+            g.pose().popPose();
+        }
     }
 
     private void renderStatus(GuiGraphics g, int mx, int my) {

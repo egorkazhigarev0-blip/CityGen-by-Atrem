@@ -1,6 +1,7 @@
 package com.citygen.dev;
 
 import com.citygen.CityGen;
+import com.citygen.client.CityEditorScreen;
 import com.citygen.client.ClientPrefs;
 import com.citygen.client.ClientState;
 import com.citygen.client.EditorScreen;
@@ -50,6 +51,9 @@ import java.util.function.BooleanSupplier;
 @Mod.EventBusSubscriber(modid = CityGen.MODID, value = Dist.CLIENT)
 public final class Trailer {
     private static final boolean ENABLED = System.getenv("CITYGEN_TRAILER") != null;
+    /** CITYGEN_TRAILER=city — ролик про редактор города (Shorts 0.3). */
+    private static final boolean CITY_SHORT = "city".equals(System.getenv("CITYGEN_TRAILER"));
+    private static java.util.function.IntConsumer hook;
     private Trailer() {}
 
     // ---------------- шаги сценария ----------------
@@ -86,7 +90,7 @@ public final class Trailer {
         if (!started) {
             if (!(mc.screen instanceof TitleScreen)) return;
             started = true;
-            buildScript();
+            if (CITY_SHORT) buildCityScript(); else buildScript();
             stepIdx = 0;
             steps.get(0).start();
         }
@@ -103,6 +107,7 @@ public final class Trailer {
         if (!ENABLED || !recording) return;
         Minecraft mc = Minecraft.getInstance();
         if (e.phase == TickEvent.Phase.START) {
+            if (hook != null) hook.accept(frame);
             if (path != null && mc.player != null) {
                 double t = frames > 0 ? Math.min(1.0, frame / (double) Math.max(1, frames - 1)) : frame;
                 apply(mc.player, path.pose(t));
@@ -118,6 +123,7 @@ public final class Trailer {
         } else done = frame >= frames;
         if (done) {
             recording = false;
+            hook = null;
             CityGen.LOG.info("TRAILER scene {} recorded: {} frames", scene, frame);
         }
     }
@@ -222,6 +228,13 @@ public final class Trailer {
     private static Step record(String name, int n, java.util.function.Supplier<Path> p) {
         return new Step() {
             public void start() { scene = name; frame = 0; frames = n; path = p.get(); until = null; recording = true; }
+            public boolean tick() { return !recording; }
+        };
+    }
+
+    private static Step recordHook(String name, int n, java.util.function.Supplier<Path> p, java.util.function.IntConsumer h) {
+        return new Step() {
+            public void start() { scene = name; frame = 0; frames = n; path = p.get(); until = null; hook = h; recording = true; }
             public boolean tick() { return !recording; }
         };
     }
@@ -573,5 +586,218 @@ public final class Trailer {
         CityGen.LOG.info("TRAILER style {} at {} box {}..{} x {}..{} top {}", k, anchor, minX, maxX, minZ, maxZ, top);
         sp.teleportTo(level, anchor.getX() + 0.5, anchor.getY() + 20, anchor.getZ() + 10, 180f, 30f);
         JobManager.startBuild(sp, s, anchor, Direction.NORTH);
+    }
+
+    // =====================================================================
+    // Shorts про редактор города (0.3.0)
+    // =====================================================================
+    private static final List<Quarter> demo = new ArrayList<>();
+    private static double[] eye;
+
+    private static Path still(double[] q) { return t -> q; }
+
+    private static void buildCityScript() {
+        Minecraft mc = Minecraft.getInstance();
+        outDir = new File(mc.gameDirectory, "trailer_city");
+        outDir.mkdirs();
+        steps.add(run(() -> {
+            mc.options.renderDistance().set(16);
+            mc.options.simulationDistance().set(12);
+            mc.options.bobView().set(false);
+            mc.options.fov().set(70);
+            mc.options.cloudStatus().set(CloudStatus.OFF);
+            mc.options.pauseOnLostFocus = false;
+            mc.options.tutorialStep = net.minecraft.client.tutorial.TutorialSteps.NONE;
+            mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
+            mc.options.gamma().set(0.7);
+            mc.options.hideGui = false;
+            if (!mc.getWindow().isFullscreen()) mc.getWindow().toggleFullScreen();
+            ClientPrefs.get().previewOnOpen = true;
+            ClientPrefs.get().accent = 0;
+            ClientPrefs.get().modernFont = true;
+            ClientPrefs.get().satRadius = 160;
+            ClientPrefs.get().mapGrid = false;
+            ClientPrefs.get().mapPlan = true;
+            String name = "CityGenShort" + System.currentTimeMillis() % 100000;
+            LevelSettings ls = new LevelSettings(name, GameType.CREATIVE, false, Difficulty.PEACEFUL, true, new GameRules(),
+                    WorldDataConfiguration.DEFAULT);
+            mc.createWorldOpenFlows().createFreshLevel(name, ls, new WorldOptions(20261013L, true, false),
+                    WorldPresets::createNormalWorldDimensions);
+        }));
+        steps.add(waitFor(() -> mc.player != null && mc.level != null && mc.screen == null));
+        steps.add(waitTicks(60));
+        steps.add(run(() -> { mc.options.guiScale().set(3); mc.resizeDisplay(); }));
+        steps.add(cmd("gamemode spectator @a"));
+        steps.add(cmd("gamerule doDaylightCycle false"));
+        steps.add(cmd("gamerule doWeatherCycle false"));
+        steps.add(cmd("gamerule doMobSpawning false"));
+        steps.add(cmd("weather clear"));
+        steps.add(cmd("time set 3000"));
+        steps.add(server(Trailer::findSite));
+        // камера над будущим городом, местность прогружается
+        steps.add(run(() -> {
+            GenSettings full = citySettings();
+            demo.clear();
+            demo.addAll(full.quarters);
+            GenSettings s = citySettings();
+            s.quarters.clear();
+            ClientState.settings = s;
+            ClientState.anchor = site;
+            ClientState.look = Direction.NORTH;
+            ClientState.dimension = mc.level.dimension();
+            ClientState.previewActive = true;
+            ClientState.selected = -1;
+            ClientState.recompute();
+            eye = look(cx(), groundY + 70, cz() + 40, cx(), groundY, cz() - 10);
+        }));
+        steps.add(preroll(() -> still(eye), 220));
+        // 1. Нетронутый лес сверху
+        steps.add(preroll(() -> orbit(cx(), groundY, cz(), span() * 0.7, 70, 230, 262, groundY), 60));
+        steps.add(record("c01_forest", 120, () -> orbit(cx(), groundY, cz(), span() * 0.7, 70, 230, 262, groundY)));
+        // 2. Открыли редактор: снимок местности
+        steps.add(preroll(() -> still(eye), 20));
+        steps.add(run(() -> mc.setScreen(new CityEditorScreen(new EditorScreen()))));
+        steps.add(waitFor(() -> !com.citygen.client.SatMap.busy()));
+        steps.add(waitTicks(20));
+        steps.add(record("c02_editor", 80, () -> still(eye)));
+        // 3. Рисуем кварталы мышью
+        steps.add(recordHook("c03_draw", 6 * 26 + 30, () -> still(eye), Trailer::drawHook));
+        // 4. Настройка квартала
+        steps.add(run(() -> {
+            ClientState.selected = 0;
+            CityEditorScreen.devCursor = null;
+            mc.setScreen(new CityEditorScreen(new EditorScreen()));
+        }));
+        steps.add(waitTicks(10));
+        steps.add(recordHook("c04_tune", 120, () -> still(eye), Trailer::tuneHook));
+        // 5. Правка в мире
+        steps.add(run(() -> {
+            mc.setScreen(null);
+            ClientState.selected = 4;
+            ClientState.worldEdit = true;
+            ClientState.recompute();
+        }));
+        steps.add(preroll(Trailer::worldEditPath, 60));
+        steps.add(recordHook("c05_world", 150, Trailer::worldEditPath, Trailer::worldHook));
+        // 6. Стройка
+        steps.add(run(() -> {
+            ClientState.worldEdit = false;
+            mc.options.hideGui = true;
+            JobManager.riseTogether = true;
+            JobManager.budgetOverrideNs = 6_000_000L;
+            ClientState.settings.quarters.clear();
+            for (Quarter q : demo) ClientState.settings.quarters.add(q.copyQ());
+            ClientState.recompute();
+            cityLayout = ClientState.layout;
+        }));
+        steps.add(preroll(() -> slowOrbit(cx(), groundY, cz(), span() * 0.8, span() * 0.5, 230, 0.12, groundY + 15), 40));
+        steps.add(run(ClientState::buildCity));
+        steps.add(recordUntil("c06_build", () -> slowOrbit(cx(), groundY, cz(), span() * 0.8, span() * 0.5, 230, 0.12, groundY + 15),
+                () -> !JobManager.busy(), 90, 0));
+        steps.add(run(() -> { JobManager.budgetOverrideNs = 0; ClientState.previewActive = false; }));
+        steps.add(waitTicks(120));
+        // 7. Улица, стройка с кранами, финал
+        steps.add(preroll(Trailer::cityStreetPath, 140));
+        steps.add(record("c07_street", 210, Trailer::cityStreetPath));
+        steps.add(preroll(Trailer::constructionPath, 120));
+        steps.add(record("c08_construction", 180, Trailer::constructionPath));
+        steps.add(preroll(() -> orbit(cx(), qy(0), cz(), span() * 1.05, 95, 150, 215, qy(0) + 35), 140));
+        steps.add(record("c09_orbit", 240, () -> orbit(cx(), qy(0), cz(), span() * 1.05, 95, 150, 215, qy(0) + 35)));
+        steps.add(preroll(Trailer::finalPath, 160));
+        steps.add(record("c10_final", 210, Trailer::finalPath));
+        steps.add(run(() -> {
+            IO.shutdown();
+            try { IO.awaitTermination(2, TimeUnit.MINUTES); } catch (InterruptedException ignored) {}
+            CityGen.LOG.info("TRAILER DONE");
+            mc.stop();
+        }));
+    }
+
+    private static double smooth(double t) { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); }
+
+    /** Кварталы появляются по одному: прямоугольник растягивается за «курсором». */
+    private static void drawHook(int f) {
+        List<Quarter> qs = ClientState.settings.quarters;
+        int per = 26, grow = 18;
+        int k = Math.min(demo.size() - 1, f / per), local = f - k * per;
+        if (f >= demo.size() * per) {
+            CityEditorScreen.devCursor = null;
+            return;
+        }
+        Quarter target = demo.get(k);
+        while (qs.size() < k) { Quarter d = demo.get(qs.size()).copyQ(); qs.add(d); ClientState.recompute(); }
+        if (qs.size() == k) {
+            Quarter q = target.copyQ();
+            q.x1 = q.x0; q.z1 = q.z0;
+            qs.add(q);
+            ClientState.selected = k;
+        }
+        Quarter q = qs.get(k);
+        double t = smooth(local / (double) grow);
+        q.x1 = q.x0 + (int) Math.round((target.x1 - target.x0) * t);
+        q.z1 = q.z0 + (int) Math.round((target.z1 - target.z0) * t);
+        if (local == grow) { q.x1 = target.x1; q.z1 = target.z1; ClientState.recompute(); }
+        CityEditorScreen ed = CityEditorScreen.open;
+        if (ed != null) {
+            double[] c = local < grow ? ed.toScreen(q.x1 + 1, q.z1 + 1) : ed.toScreen(q.x1 + 1, q.z1 + 1);
+            if (local >= grow) {
+                double[] nx = k + 1 < demo.size() ? ed.toScreen(demo.get(k + 1).x0, demo.get(k + 1).z0) : c;
+                double u = smooth((local - grow) / (double) (per - grow));
+                c = new double[]{c[0] + (nx[0] - c[0]) * u, c[1] + (nx[1] - c[1]) * u};
+            }
+            CityEditorScreen.devCursor = c;
+        }
+    }
+
+    /** Меняем тип квартала — план внутри перерисовывается. */
+    private static void tuneHook(int f) {
+        QuarterKind[] kinds = {QuarterKind.DOWNTOWN, QuarterKind.RESIDENTIAL, QuarterKind.HISTORIC, QuarterKind.COMMERCIAL, QuarterKind.DOWNTOWN};
+        if (f % 24 != 0) return;
+        int i = f / 24;
+        if (i >= kinds.length) return;
+        Quarter q = ClientState.settings.quarters.get(0);
+        q.kind = kinds[i];
+        ClientState.recompute();
+        if (CityEditorScreen.open != null) CityEditorScreen.open.devRefresh();
+    }
+
+    /** Уровень земли квартала i по текущей раскладке. */
+    private static int qy(int i) {
+        Layout L = ClientState.layout;
+        return L != null && i < L.quarterGround.length ? L.quarterGround[i] : groundY;
+    }
+
+    /** Квартал «едет» стрелками туда и обратно. */
+    private static void worldHook(int f) {
+        Quarter q = ClientState.settings.quarters.get(4);
+        Quarter base = demo.get(4);
+        int off;
+        if (f < 30) off = 0;
+        else if (f < 70) off = (f - 30) / 3;
+        else if (f < 90) off = 13;
+        else off = Math.max(0, 13 - (f - 90) / 3);
+        int dz = base.z0 + off - q.z0; // на юг — там нет соседей
+        if (dz != 0) { q.moveBy(0, dz); ClientState.requestRecompute(); }
+    }
+
+    private static Path worldEditPath() {
+        Quarter q = demo.get(4);
+        double x = (q.x0 + q.x1) / 2.0, z = (q.z0 + q.z1) / 2.0, g = qy(4);
+        return dolly(new double[]{x - 24, g + 46, z + 78}, new double[]{x + 8, g + 40, z + 72},
+                new double[]{x, g + 2, z + 4}, new double[]{x + 4, g + 2, z + 8});
+    }
+
+    private static Path cityStreetPath() {
+        // по общей дороге между кварталами, на уровне глаз
+        Quarter a = demo.get(0);
+        double g = qy(0), x = a.x1 + 7.5, y = g + 2.8;
+        return dolly(new double[]{x, y, a.z0 - 4}, new double[]{x, y + 1, a.z1 + 30},
+                new double[]{x + 2, g + 8, a.z0 + 30}, new double[]{x, g + 6, a.z1 + 70});
+    }
+
+    private static Path constructionPath() {
+        Quarter q = demo.get(4);
+        double x = (q.x0 + q.x1) / 2.0, z = (q.z0 + q.z1) / 2.0, g = qy(4);
+        return orbit(x, g, z, 55, 30, 60, 120, g + 22);
     }
 }
